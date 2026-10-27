@@ -5,7 +5,10 @@ Brain -> board, every brain tick (20 Hz):
     mode is what the brain asks for: "stand", "walk", "lie" or "limp".
 Board -> brain, 50 Hz:
     {"t": s, "x": m, "y": m, "z": m, "yaw": rad, "mode": "STAND",
-     "tripped": null or why, "walker": true/false}
+     "tripped": null or why, "walker": true/false,
+     "lidar": null (none fitted) or {"front": m, "back": m, "left": m, "right": m,
+              "age": s}, free distance from the body, null where nothing is seen;
+              go2_board.lidar.CloudLink gets the points themselves, on 9872
 
 UDP because neither side may ever wait on the other: a lost datagram is
 replaced by the next one 50 ms later, and the board treats silence as an

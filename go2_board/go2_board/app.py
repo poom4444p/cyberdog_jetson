@@ -4,6 +4,10 @@ Each 500 Hz tick: read the brain's newest command, act on a changed mode
 request, tick the motors through Safety, and every STATE_EVERY ticks tell
 the brain where the dog is and what the board is doing.
 
+With a LiDAR (go2_board.lidar.Lidar), the brain's velocity is limited by the
+free distance it sees each way before the walker gets it, and the state
+message carries that clearance. Without one, the velocity passes as it is.
+
 Mode requests act on change only. The brain sends one with every command;
 if the dog falls while "stand" is still arriving 20 times a second, the
 board stays limp until the request changes ("limp", then "stand" again).
@@ -11,6 +15,7 @@ board stays limp until the request changes ("limp", then "stand" again).
 import math
 
 from go2_board.board import Board
+from go2_board.lidar import guard
 from go2_board.link import BoardLink
 from go2_board.modes import Modes
 
@@ -23,8 +28,9 @@ def yaw(quat):
 
 
 class App:
-    def __init__(self, bus, link=None, walker=None, board=None):
+    def __init__(self, bus, link=None, walker=None, board=None, lidar=None):
         self.bus = bus
+        self.lidar = lidar
         self.board = board or Board(bus)
         self.link = link or BoardLink(clock=self.board.clock)
         self.modes = Modes(walker)
@@ -42,7 +48,10 @@ class App:
         if self.modes.wants_reset:
             self.board.safety.reset()
             self.modes.wants_reset = False
-        self.modes.velocity = self.link.velocity()
+        v = self.link.velocity()
+        if self.lidar is not None:
+            v = guard(*v, self.lidar.clearance(), t)
+        self.modes.velocity = v
         return self.modes.step(state, t)
 
     def tick(self):
@@ -65,7 +74,14 @@ class App:
             z=None if pos[2] is None else float(pos[2]),
             yaw=None if s is None else yaw(s.quat),
             mode=self.modes.mode, tripped=self.board.safety.tripped,
-            walker=self.modes.walker is not None)
+            walker=self.modes.walker is not None,
+            lidar=self._lidar_state())
+
+    def _lidar_state(self):
+        if self.lidar is None:
+            return None
+        c = self.lidar.clearance()
+        return {"age": None} if c is None else c.as_dict(self.board.clock())
 
     def run(self, seconds=None):
         """Tick on the board's schedule until `seconds` pass (None: forever)."""

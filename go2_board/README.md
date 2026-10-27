@@ -28,6 +28,7 @@ J4012
 | `go2_board/link.py` | The brain link: UDP on localhost, commands in (`vx, vy, w`, mode), state out at 50 Hz |
 | `go2_board/app.py` | The board as a program: link, modes, safety and bus, one tick at a time |
 | `go2_board/livox.py` | Mid-360 packets (Livox SDK2 UDP) to points: CRC, udp_cnt gaps, frames; same code for the real sensor |
+| `go2_board/lidar.py` | The Mid-360 in use: a thread that levels each frame with the sensor's IMU, works out the free distance each way for the loop (`guard` limits the brain's velocity by it), and sends the cloud to the brain on 9872 (`CloudLink` is the brain's end) |
 | `scripts/board_main.py` | Run the board against the sim, waiting for the brain |
 | `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:1 lie:2` |
 | `scripts/run_board.py` | Stand up, hold, lie down, go limp, with no brain |
@@ -53,6 +54,17 @@ simulator's ground truth. On the real dog it has to come from FAST-LIO.
 
 Points arrive on UDP 56301 and IMU on 56401, from go2_world's emulator on the
 Mac or from the real sensor on the J4012; `livox.py` cannot tell which.
+
+```
+Mid-360 --56301/56401--> Lidar thread --Clearance--> App.step: guard(vx, vy, w)  (500 Hz)
+                                  \----9872-------> brain: CloudLink (levelled trunk frame)
+```
+
+In WALK the brain's vx and vy are scaled down from 1.0 m of free distance and
+stopped at 0.3 m, each way; a LiDAR silent for 0.3 s stops translation but
+not turning. The state message to the brain carries the clearance. The mount
+(`lidar.MOUNT_PITCH`, `SENSOR_HEIGHT`) must match go2_world's until the real
+bracket is measured. `board_main.py --no-lidar` runs without it.
 
 ```
 python ~/Work/unitree/go2_world/scripts/run_lidar.py --static   # Mac: a fake Mid-360
