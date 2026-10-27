@@ -27,9 +27,11 @@ J4012
 | `go2_board/modes.py` | LIMP, STAND_UP, STAND, WALK, LIE_DOWN, and what may follow what |
 | `go2_board/link.py` | The brain link: UDP on localhost, commands in (`vx, vy, w`, mode), state out at 50 Hz |
 | `go2_board/app.py` | The board as a program: link, modes, safety and bus, one tick at a time |
+| `go2_board/livox.py` | Mid-360 packets (Livox SDK2 UDP) to points: CRC, udp_cnt gaps, frames; same code for the real sensor |
 | `scripts/board_main.py` | Run the board against the sim, waiting for the brain |
 | `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:1 lie:2` |
 | `scripts/run_board.py` | Stand up, hold, lie down, go limp, with no brain |
+| `scripts/livox_watch.py` | Print what the Mid-360 (real or go2_world's) is sending, once a second |
 
 ## Run against the sim (Mac)
 
@@ -46,6 +48,21 @@ there, and the loopback is `lo0`. On the J4012 neither applies.
 
 In the sim the body position comes from `rt/sportmodestate`, which is the
 simulator's ground truth. On the real dog it has to come from FAST-LIO.
+
+## Mid-360
+
+Points arrive on UDP 56301 and IMU on 56401, from go2_world's emulator on the
+Mac or from the real sensor on the J4012; `livox.py` cannot tell which.
+
+```
+python ~/Work/unitree/go2_world/scripts/run_lidar.py --static   # Mac: a fake Mid-360
+python scripts/livox_watch.py                                   # 10 frames/s, 200 imu/s, lost, bad
+```
+
+The real sensor sends to the host IP configured in it (Livox's quick start
+puts the PC at 192.168.1.50; check the unit), so the J4012's Ethernet needs
+that address, or the sensor needs telling another. `livox.py` listens on every
+interface.
 
 ## Not yet
 
