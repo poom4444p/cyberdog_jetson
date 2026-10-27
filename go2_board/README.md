@@ -24,22 +24,31 @@ J4012
 | `go2_board/safety.py` | Clips targets to joint range and peak torque; damping, latched, on stale state, a fall or a failed controller |
 | `go2_board/controllers.py` | `Pose`: move smoothly to a pose and hold it |
 | `go2_board/board.py` | The 500 Hz loop: read, controller, safety, write |
-| `scripts/run_board.py` | Stand up, hold, lie down, go limp, against the sim |
+| `go2_board/modes.py` | LIMP, STAND_UP, STAND, WALK, LIE_DOWN, and what may follow what |
+| `go2_board/link.py` | The brain link: UDP on localhost, commands in (`vx, vy, w`, mode), state out at 50 Hz |
+| `go2_board/app.py` | The board as a program: link, modes, safety and bus, one tick at a time |
+| `scripts/board_main.py` | Run the board against the sim, waiting for the brain |
+| `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:1 lie:2` |
+| `scripts/run_board.py` | Stand up, hold, lie down, go limp, with no brain |
 
 ## Run against the sim (Mac)
 
 ```
 conda activate unitree_sim
 mjpython ~/Work/unitree/scripts/run_sim.py          # terminal 1: the sim's Go2
-python scripts/run_board.py --hold 3                 # terminal 2: the board
+python scripts/board_main.py                         # terminal 2: the board
+python scripts/brain_cli.py stand:3 lie:2            # terminal 3: a stand-in brain
 python -m pytest -q                                  # no sim needed
 ```
 
 macOS: the SDK's timer is Linux-only, so `_macos_timerfd.py` stands in for it
 there, and the loopback is `lo0`. On the J4012 neither applies.
 
+In the sim the body position comes from `rt/sportmodestate`, which is the
+simulator's ground truth. On the real dog it has to come from FAST-LIO.
+
 ## Not yet
 
-- The walking policy (a controller taking vx, vy, w).
+- The walking policy (a controller taking vx, vy, w): WALK is refused until one is loaded.
 - A bus to real motor drivers.
 - Battery and temperature limits.

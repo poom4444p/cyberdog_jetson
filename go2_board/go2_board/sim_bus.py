@@ -15,7 +15,7 @@ if sys.platform == "darwin":
 from unitree_sdk2py.core.channel import (ChannelFactoryInitialize, ChannelPublisher,  # noqa: E402
                                          ChannelSubscriber)
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_  # noqa: E402
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_  # noqa: E402
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_, SportModeState_  # noqa: E402
 from unitree_sdk2py.utils.crc import CRC  # noqa: E402
 
 from go2_board import go2  # noqa: E402
@@ -39,6 +39,14 @@ class SimBus(MotorBus):
         self._pub.Init()
         self._sub = ChannelSubscriber("rt/lowstate", LowState_)
         self._sub.Init(self._on_state, 10)
+        # The sim's body position. It is the simulator's ground truth, not an
+        # estimate: on the real dog this comes from FAST-LIO instead.
+        self._pos = None
+        self._high = ChannelSubscriber("rt/sportmodestate", SportModeState_)
+        self._high.Init(self._on_high, 10)
+
+    def _on_high(self, msg):
+        self._pos = np.array(msg.position, float)
 
     def _on_state(self, msg):
         ms, imu = msg.motor_state, msg.imu_state
@@ -48,7 +56,8 @@ class SimBus(MotorBus):
             quat=np.array(imu.quaternion, float),
             gyro=np.array(imu.gyroscope, float),
             acc=np.array(imu.accelerometer, float),
-            stamp=time.monotonic())
+            stamp=time.monotonic(),
+            pos=self._pos)
         with self._lock:
             self._state = state
 

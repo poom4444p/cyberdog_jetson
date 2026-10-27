@@ -22,6 +22,7 @@ class BoardState:
     gyro: np.ndarray         # (3,) body rates, rad/s
     acc: np.ndarray          # (3,) m/s^2
     stamp: float             # time.monotonic() when it arrived
+    pos: np.ndarray = None   # (3,) body position in the odometry frame, if the bus has one
 
 
 @dataclass
