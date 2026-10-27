@@ -14,10 +14,11 @@ from go2_board.livox import Frame, ImuSample
 R_TS = L.mount_rotation()
 
 
-def to_sensor(pts_level, pitch_extra=0.0):
+def to_sensor(pts_level, pitch_extra=0.0, height=L.SENSOR_HEIGHT):
     """Levelled trunk-frame points as the sensor would report them, with the
-    trunk itself pitched nose-down by pitch_extra degrees."""
-    p = np.asarray(pts_level, float) - [L.MOUNT_X, 0.0, L.SENSOR_HEIGHT]
+    trunk itself pitched nose-down by pitch_extra degrees, the sensor `height`
+    above the floor."""
+    p = np.asarray(pts_level, float) - [L.MOUNT_X, 0.0, height]
     R_wt = L.mount_rotation(pitch_extra)          # trunk pitched, as seen from the level frame
     return np.einsum("ij,jk->ik", p, R_wt @ R_TS)  # (R_wt R_ts)^T p, row-wise
 
@@ -67,6 +68,26 @@ def test_wall_ahead_and_no_floor_even_when_the_dog_pitches(pitch):
     c = li.clearance()
     assert c.front == pytest.approx(2.0 - L.BODY_FRONT, abs=0.03)
     assert math.isinf(c.back) and math.isinf(c.left) and math.isinf(c.right)
+
+
+@pytest.mark.parametrize("height", [0.32, 0.50, 0.60])     # lying, Cyberdog's, tall
+def test_floor_found_whatever_the_height(height):
+    li = Lidar(clock=Clock(), brain=None)
+    li.process([], still_imu())
+    li.process([frame(to_sensor(floor_and_wall(2.5), height=height))], [])
+    assert li.height == pytest.approx(height, abs=0.01)
+    assert li.clearance().front == pytest.approx(2.5 - L.BODY_FRONT, abs=0.03)
+
+
+def test_wall_filling_the_view_keeps_the_last_floor():
+    li = Lidar(clock=Clock(), brain=None)
+    li.process([], still_imu())
+    li.process([frame(to_sensor(floor_and_wall(2.5), height=0.32))], [])
+    zs, ys = np.meshgrid(np.linspace(0.0, 1.5, 16), np.linspace(-1, 1, 21))
+    wall = np.stack([np.full(zs.size, 0.6), ys.ravel(), zs.ravel()], 1)   # nose to a wall
+    li.process([frame(to_sensor(wall, height=0.32))], [])
+    assert li.height == pytest.approx(0.32, abs=0.01)
+    assert li.clearance().front == pytest.approx(0.6 - L.BODY_FRONT, abs=0.03)
 
 
 def test_without_the_imu_a_pitching_dog_sees_the_floor_rise():

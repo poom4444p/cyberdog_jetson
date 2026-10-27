@@ -35,10 +35,18 @@ import numpy as np
 from go2_board.livox import LivoxReceiver
 
 # Mount, sensor frame -> trunk: must match go2_world/mid360.py until the real
-# bracket is measured. Sensor height is above the floor at standing height.
+# bracket is measured. SENSOR_HEIGHT is only where the floor search starts:
+# each frame finds the floor itself, since lying, standing up and walking each
+# put the sensor at a different height.
 MOUNT_X = 0.0
 MOUNT_PITCH = 20.0           # degrees nose-down
 SENSOR_HEIGHT = 0.50
+
+# The floor: the patch the pitched mount sees well, ahead of the front feet.
+FLOOR_PATCH = (0.8, 3.0, 1.0)    # x from, x to, |y| under; levelled sensor frame
+FLOOR_BAND = 0.03                # m around the lowest tenth that counts as floor
+FLOOR_MIN = 20                   # points, or keep the last height
+HEIGHT_RANGE = (0.10, 0.90)      # a height outside this is not believed
 
 # The body, from the trunk origin, and what counts as in the way.
 BODY_FRONT, BODY_BACK, BODY_HALF_W = 0.35, 0.35, 0.20
@@ -104,6 +112,24 @@ def clearance(xyz, stamp):
         max(0.0, nearest(y[along & (y > 0)]) - BODY_HALF_W),
         max(0.0, nearest(-y[along & (y < 0)]) - BODY_HALF_W),
         stamp, len(p))
+
+
+def floor_height(pts, last):
+    """The sensor's height above the floor, from levelled sensor-frame points:
+    the lowest tenth of the patch ahead, then everything within FLOOR_BAND of
+    it. Too few points (a wall right in front) or an unbelievable answer:
+    keep the last one."""
+    x0, x1, half_w = FLOOR_PATCH
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    patch = z[(x > x0) & (x < x1) & (np.abs(y) < half_w) & np.any(pts != 0, axis=1)]
+    if len(patch) < FLOOR_MIN:
+        return last
+    low = np.percentile(patch, 10)
+    floor = patch[np.abs(patch - low) < FLOOR_BAND]
+    h = -float(np.median(floor))
+    if len(floor) < FLOOR_MIN or not HEIGHT_RANGE[0] < h < HEIGHT_RANGE[1]:
+        return last
+    return h
 
 
 def _scale(free):
@@ -198,6 +224,7 @@ class Lidar:
         self.brain = brain
         self.R_ts = mount_rotation(mount_pitch)
         self.up = self.R_ts.T @ np.array([0.0, 0.0, 1.0])   # sensor frame, until the IMU says
+        self.height = SENSOR_HEIGHT                          # sensor above the floor, per frame
         self.latest = None                                   # Clearance
         self.seq = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if brain else None
@@ -211,8 +238,9 @@ class Lidar:
         """Sensor-frame points -> levelled trunk frame, floor at z = 0."""
         R = levelling(self.up)
         pts = np.einsum("ij,kj->ik", xyz_sensor, R)   # not @: Accelerate warns spuriously on macOS
+        self.height = floor_height(pts, self.height)
         pts[:, 0] += MOUNT_X
-        pts[:, 2] += SENSOR_HEIGHT
+        pts[:, 2] += self.height
         return pts
 
     def process(self, frames, samples):

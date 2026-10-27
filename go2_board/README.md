@@ -63,8 +63,9 @@ Mid-360 --56301/56401--> Lidar thread --Clearance--> App.step: guard(vx, vy, w) 
 In WALK the brain's vx and vy are scaled down from 1.0 m of free distance and
 stopped at 0.3 m, each way; a LiDAR silent for 0.3 s stops translation but
 not turning. The state message to the brain carries the clearance. The mount
-(`lidar.MOUNT_PITCH`, `SENSOR_HEIGHT`) must match go2_world's until the real
-bracket is measured. `board_main.py --no-lidar` runs without it.
+(`lidar.MOUNT_PITCH`) must match go2_world's until the real
+bracket is measured; the floor is found in each frame, so the dog's height
+does not matter. `board_main.py --no-lidar` runs without it.
 
 ```
 python ~/Work/unitree/go2_world/scripts/run_lidar.py --static   # Mac: a fake Mid-360
