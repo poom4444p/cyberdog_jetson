@@ -95,26 +95,30 @@ python tools/sim2sim_mujoco.py policies/<run>
 `--obstacles` keeps them. Earlier runs walked into the first bar and were
 read as failing to walk.
 
-| Command | go2_flat_v1 | go2_flat_v2 | go2_flat_v3 |
-|---|---|---|---|
-| vx 0.5 | spins | +0.56 | +0.43 |
-| vx 1.0 | spins | +1.04 | +0.95 |
-| vx -0.5 | spins | -0.54 | -0.43 |
-| vy 0.3 | spins | +0.27 | +0.16 |
-| w 0.8 | spins | +0.56 | +0.49 |
-| still | spins (-0.6 rad/s) | 0.00 | 0.00 |
-| max tilt | 21 deg | 4.7 deg | 6.0 deg |
+| Command | v1 | v2 | v3 | v4 | **v5** |
+|---|---|---|---|---|---|
+| vx 0.5 | spins | +0.56 | +0.43 | +0.54 | **+0.53** |
+| vx 1.0 | spins | +1.04 | +0.95 | +1.02 | **+1.03** |
+| vx -0.5 | spins | -0.54 | -0.43 | -0.59 | **-0.61** |
+| vy 0.3 | spins | +0.27 | +0.16 | +0.28 | **+0.28** |
+| w 0.8 | spins | +0.56 | +0.49 | +0.56 | **+0.72** |
+| still | spins (-0.6 rad/s) | 0.00 | 0.00 | 0.00 | **0.00** |
+| max tilt | 21 deg | 4.7 deg | 6.0 deg | 4.7 deg | **4.3 deg** |
 
 v1 trained on Genesis' default joint armature (0.1, ten times the Go2
 model's); v2 on the Go2's joint dynamics, randomized; v3 adds feet rewards
-and tracks a little worse. **go2_flat_v2 is the one to use**; it turns at
-70 % of what it is asked.
+and tracks a little worse; v4 (v2 + 400 iterations) adds torsional friction
+at the feet, fixed at 0.02, which in Genesis resists spin far less than
+MuJoCo's 0.02; v5 (v4 + 400) draws it from 0.02-0.1 every second.
+**go2_flat_v5 is the one to use.** It turns at 90 % here; with the feet's
+torsional friction off (`--condim 3`) at +0.97, on 0.8 friction at +0.62.
+The real feet's spin resistance is unknown: expect turning to need tuning.
 
 `run_sim.py` loads the same scene with the bars in it: in the full sim,
 keep forward walks under ~1 m from the start.
 
 ## Not yet
 
-- Turning tracks at 70 % (go2_flat_v2, w 0.8 -> 0.56).
+- Turning depends on the feet's spin resistance (go2_flat_v5: 0.62-0.97 for 0.8).
 - A bus to real motor drivers.
 - Battery and temperature limits.
