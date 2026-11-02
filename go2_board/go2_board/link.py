@@ -63,7 +63,10 @@ class BoardLink:
                               mode if mode in MODES else None, int(m["seq"]), self.clock())
             except (ValueError, KeyError, TypeError):
                 continue                      # a bad datagram is dropped, not obeyed
-            if cmd.seq > self.last.seq or cmd.seq < self.last.seq - 1000:   # restarted brain
+            # A lower seq is a late datagram while the brain is talking, and
+            # a restarted brain (counting from 0 again) once it has gone quiet.
+            quiet = cmd.stamp - self.last.stamp > CMD_TIMEOUT_S
+            if cmd.seq > self.last.seq or quiet:
                 self.last = cmd
         return self.last
 

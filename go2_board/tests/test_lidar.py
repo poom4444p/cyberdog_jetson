@@ -117,8 +117,15 @@ def test_guard_slows_then_stops_each_way():
     vx, _, _ = guard(0.5, 0.0, 0.0, C(front=(L.STOP_M + L.SLOW_M) / 2), 0.0)
     assert vx == pytest.approx(0.25)
     assert guard(0.5, 0.2, 0.3, C(front=0.1, left=0.1), 0.0) == (0.0, 0.0, 0.3)
-    assert guard(-0.5, -0.2, 0.0, C(front=0.0, left=0.0), 0.0) == (-0.5, -0.2, 0.0)  # backing away
+    assert guard(-0.5, -0.2, 0.0, C(front=0.0, left=0.0), 0.0) == (-L.REVERSE_MAX, -0.2, 0.0)  # backing away
     assert guard(-0.5, -0.2, 0.0, C(back=0.0, right=0.0), 0.0) == (0.0, 0.0, 0.0)
+
+
+def test_guard_backs_up_slowly_even_with_nothing_seen_behind():
+    assert guard(-0.6, 0.0, 0.2, C(back=9.0), 0.0) == (-L.REVERSE_MAX, 0.0, 0.2)
+    assert guard(-0.1, 0.0, 0.0, C(back=9.0), 0.0) == (-0.1, 0.0, 0.0)
+    vx, _, _ = guard(-0.6, 0.0, 0.0, C(back=(L.STOP_M + L.SLOW_M) / 2), 0.0)
+    assert vx == pytest.approx(-L.REVERSE_MAX / 2)
 
 
 def test_guard_blind_stops_translation_but_not_turning():
@@ -216,3 +223,14 @@ def test_app_without_a_lidar_reports_none():
     a, inbox, _ = app()
     run(a, 0.05)
     assert inbox.states[-1]["lidar"] is None
+
+
+def test_floor_height_without_a_usable_floor_keeps_the_last_quietly():
+    import warnings
+    from go2_board.lidar import floor_height
+    pts = np.zeros((40, 3))
+    pts[:, 0] = np.linspace(1.0, 2.5, 40)
+    pts[:, 2] = np.nan                              # a patch with no usable heights
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert floor_height(pts, 0.42) == 0.42
