@@ -8,7 +8,7 @@ exported policy before the full sim.
   python tools/sim2sim_mujoco.py policies/go2_flat_v1
   python tools/sim2sim_mujoco.py policies/go2_flat_v1 --armature 0.1 --friction 1.0
 
---armature, --friction, --no-joint-friction change the MuJoCo model, to find
+--armature, --friction, --no-joint-friction, --condim, --no-self-collision change the MuJoCo model, to find
 which difference from the training sim matters.
 """
 import argparse
@@ -37,6 +37,8 @@ ap.add_argument("policy")
 ap.add_argument("--armature", type=float, default=None, help="leg joints' armature (MuJoCo model: 0.01)")
 ap.add_argument("--friction", type=float, default=None, help="every geom's sliding friction (model: 0.4)")
 ap.add_argument("--no-joint-friction", action="store_true", help="leg joints' damping and frictionloss to 0")
+ap.add_argument("--no-self-collision", action="store_true", help="robot geoms collide with the floor only (as Genesis trains)")
+ap.add_argument("--condim", type=int, default=None, help="feet's contact dimension (model: 6, with torsional and rolling friction)")
 args = ap.parse_args()
 
 m = mujoco.MjModel.from_xml_path(XML)
@@ -47,6 +49,13 @@ if args.armature is not None:
     m.dof_armature[6:] = args.armature
 if args.friction is not None:
     m.geom_friction[:, 0] = args.friction
+if args.no_self_collision:
+    robot = m.geom_bodyid != 0                    # body 0 is the world: the floor
+    m.geom_contype[robot] = 0
+    m.geom_conaffinity[robot] = 1
+if args.condim is not None:
+    for leg in ("FR", "FL", "RR", "RL"):
+        m.geom_condim[m.geom(leg).id] = args.condim
 if args.no_joint_friction:
     m.dof_frictionloss[6:] = 0.0
     m.dof_damping[6:] = 0.0
@@ -80,7 +89,8 @@ def run(modes, seconds, vel=(0.0, 0.0, 0.0), log=None):
 
 walker = PolicyWalker(args.policy)
 print(f"{walker.name} in {os.path.basename(XML)}: armature {m.dof_armature[6]:.3f}, "
-      f"friction {m.geom_friction[-1, 0]:.2f}, joint frictionloss {m.dof_frictionloss[6]:.2f}")
+      f"friction {m.geom_friction[-1, 0]:.2f}, joint frictionloss {m.dof_frictionloss[6]:.2f}, "
+      f"foot condim {m.geom_condim[m.geom('FR').id]}")
 modes = Modes(walker)
 modes.mode, modes.pose = "STAND", Pose(go2.STAND, 1.0)
 run(modes, 1.5)

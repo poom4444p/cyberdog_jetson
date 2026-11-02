@@ -101,9 +101,14 @@ standing track. Forward still does not.
 spins here, but it does not walk either (|v| < 0.06 for every command): its
 front shins drag on the floor within 2 s. It shuffles in Genesis, and a
 shuffle depends on contact details the two simulators do not share.
+`go2_flat_v3` adds feet air time and clearance rewards: it barely moves at
+0.5 m/s here and falls at 1.0 m/s. The joints respond the same in both sims
+(base held, same step), and foot friction, condim, joint friction and
+self-collision change nothing (`--friction`, `--condim`, `--no-joint-friction`,
+`--no-self-collision`); go2_train's README has the details.
 
 ## Not yet
 
-- A walking policy that passes sim2sim_mujoco.py (go2_flat_v1 and v2 do not).
+- A walking policy that passes sim2sim_mujoco.py (go2_flat_v1, v2 and v3 do not).
 - A bus to real motor drivers.
 - Battery and temperature limits.
