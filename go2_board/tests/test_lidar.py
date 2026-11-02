@@ -223,3 +223,14 @@ def test_app_without_a_lidar_reports_none():
     a, inbox, _ = app()
     run(a, 0.05)
     assert inbox.states[-1]["lidar"] is None
+
+
+def test_floor_height_without_a_usable_floor_keeps_the_last_quietly():
+    import warnings
+    from go2_board.lidar import floor_height
+    pts = np.zeros((40, 3))
+    pts[:, 0] = np.linspace(1.0, 2.5, 40)
+    pts[:, 2] = np.nan                              # a patch with no usable heights
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert floor_height(pts, 0.42) == 0.42

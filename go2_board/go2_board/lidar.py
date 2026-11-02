@@ -129,8 +129,10 @@ def floor_height(pts, last):
         return last
     low = np.percentile(patch, 10)
     floor = patch[np.abs(patch - low) < FLOOR_BAND]
+    if len(floor) < FLOOR_MIN:
+        return last
     h = -float(np.median(floor))
-    if len(floor) < FLOOR_MIN or not HEIGHT_RANGE[0] < h < HEIGHT_RANGE[1]:
+    if not HEIGHT_RANGE[0] < h < HEIGHT_RANGE[1]:
         return last
     return h
 
