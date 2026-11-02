@@ -54,6 +54,9 @@ MARGIN = 0.10
 OBSTACLE_Z = (0.10, 1.00)    # above the floor
 
 STOP_M, SLOW_M = 0.30, 1.00  # free distance: no motion that way / full speed
+# Behind, the nose-down mount's lowest ray (-7 deg + 20 deg) points 13 deg up:
+# nothing lower than the sensor is ever seen there, so backing up is slow.
+REVERSE_MAX = 0.2           # m/s
 STALE_S = 0.30               # three frames missed: treat as blind
 G_ALPHA = 0.02               # gravity low-pass a 200 Hz sample: ~0.25 s
 
@@ -138,9 +141,11 @@ def _scale(free):
 
 def guard(vx, vy, w, c, now):
     """The brain's velocity, limited by what the LiDAR sees. c None or stale:
-    no translation, turning still allowed."""
+    no translation, turning still allowed. Backwards: never past REVERSE_MAX."""
     if c is None or now - c.stamp > STALE_S:
         return 0.0, 0.0, w
+    if vx < 0:
+        vx = max(vx, -REVERSE_MAX)
     vx *= _scale(c.front) if vx > 0 else _scale(c.back) if vx < 0 else 1.0
     vy *= _scale(c.left) if vy > 0 else _scale(c.right) if vy < 0 else 1.0
     return vx, vy, w
