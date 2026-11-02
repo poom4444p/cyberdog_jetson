@@ -6,7 +6,7 @@ drivers, on the J4012. It replaces what the Go2's own main board does.
 ```
 J4012
   (1) brain           Cyberdog repo: vx, vy, w                  20 Hz
-  (2) controller      Pose now; the walking policy next          500 Hz
+  (2) controller      Pose (stand, lie); PolicyWalker (WALK)     500 Hz, policy 50 Hz
   (3) safety          limits, and damping when it cannot trust   500 Hz
   (4) motor bus       MotorCmd out, BoardState in                500 Hz
         |
@@ -23,15 +23,17 @@ J4012
 | `go2_board/sim_bus.py` | `SimBus`: the bus over DDS in Unitree's format |
 | `go2_board/safety.py` | Clips targets to joint range and peak torque; damping, latched, on stale state, a fall or a failed controller |
 | `go2_board/controllers.py` | `Pose`: move smoothly to a pose and hold it |
+| `go2_board/walker.py` | `PolicyWalker`: the policy go2_train exported (`policy_spec.json`, `policy.npz`), in numpy. Checks the spec's samples on load, blends from STAND to the policy's pose and gains, runs it every 10th tick |
 | `go2_board/board.py` | The 500 Hz loop: read, controller, safety, write |
 | `go2_board/modes.py` | LIMP, STAND_UP, STAND, WALK, LIE_DOWN, and what may follow what |
 | `go2_board/link.py` | The brain link: UDP on localhost, commands in (`vx, vy, w`, mode), state out at 50 Hz |
 | `go2_board/app.py` | The board as a program: link, modes, safety and bus, one tick at a time |
+| `tools/sim2sim_mujoco.py` | A policy through Modes, PolicyWalker and safety in unitree_mujoco's Go2, headless, ~30 s: does it walk in a sim it did not train in? |
 | `tools/check_j4012.sh` | What a J4012 has (JetPack, kernel, CUDA, torch, network), read-only: run it on the board first |
 | `go2_board/livox.py` | Mid-360 packets (Livox SDK2 UDP) to points: CRC, udp_cnt gaps, frames; same code for the real sensor |
 | `go2_board/lidar.py` | The Mid-360 in use: a thread that levels each frame with the sensor's IMU, works out the free distance each way for the loop (`guard` limits the brain's velocity by it), and sends the cloud to the brain on 9872 (`CloudLink` is the brain's end) |
 | `scripts/board_main.py` | Run the board against the sim, waiting for the brain |
-| `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:1 lie:2` |
+| `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:5:0.5,0,0 lie:2` (mode:seconds[:vx,vy,w]) |
 | `scripts/run_board.py` | Stand up, hold, lie down, go limp, with no brain |
 | `scripts/livox_watch.py` | Print what the Mid-360 (real or go2_world's) is sending, once a second |
 
@@ -40,8 +42,8 @@ J4012
 ```
 conda activate unitree_sim
 mjpython ~/Work/unitree/go2_world/scripts/run_sim.py          # terminal 1: the sim's Go2
-python scripts/board_main.py                         # terminal 2: the board
-python scripts/brain_cli.py stand:3 lie:2            # terminal 3: a stand-in brain
+python scripts/board_main.py --policy policies/go2_flat_v1   # terminal 2: the board
+python scripts/brain_cli.py stand:3 walk:2 walk:5:0.5,0,0 stand:2 lie:2   # terminal 3
 python -m pytest -q                                  # no sim needed
 ```
 
@@ -78,8 +80,26 @@ puts the PC at 192.168.1.50; check the unit), so the J4012's Ethernet needs
 that address, or the sensor needs telling another. `livox.py` listens on every
 interface.
 
+## Walking policies
+
+`policies/<run>/` holds what go2_train exported (copy `logs/<run>/exported/`
+there; not in git). `board_main.py --policy` loads one; without it, WALK is
+refused. Before trusting a new one:
+
+```
+python tools/sim2sim_mujoco.py policies/<run>
+```
+
+`go2_flat_v1` walks in Genesis but not here: it stays up, yet drifts and
+spins (-0.6 rad/s) whatever it is told. The board's observation matches
+Genesis' to 1e-7, so the board is not the cause. Genesis gives every joint
+an armature of 0.1, ten times unitree_mujoco's 0.01; with 0.1 set here
+(`--armature 0.1`) the spin is gone and backward, sideways, turning and
+standing track. Forward still does not. The next run trains with realistic
+armature, randomized.
+
 ## Not yet
 
-- The walking policy (a controller taking vx, vy, w): WALK is refused until one is loaded.
+- A walking policy that passes sim2sim_mujoco.py (go2_flat_v1 does not).
 - A bus to real motor drivers.
 - Battery and temperature limits.
