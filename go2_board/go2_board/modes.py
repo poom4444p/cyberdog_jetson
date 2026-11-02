@@ -17,6 +17,7 @@ from go2_board.controllers import Pose
 
 STAND_UP_S = 1.5
 LIE_DOWN_S = 1.5
+WALK_TO_STAND_S = 0.5     # from the walking pose (and gains) back to STAND
 
 
 class Modes:
@@ -39,7 +40,7 @@ class Modes:
                 self.wants_reset = True
                 self._enter("STAND_UP", Pose(go2.STAND, STAND_UP_S))
             elif m == "WALK":
-                self._enter("STAND", Pose(go2.STAND, 0.0))
+                self._enter("STAND", Pose(go2.STAND, WALK_TO_STAND_S))
         elif want == "walk":
             if m == "STAND":
                 if self.walker is None:

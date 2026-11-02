@@ -6,7 +6,7 @@ drivers, on the J4012. It replaces what the Go2's own main board does.
 ```
 J4012
   (1) brain           Cyberdog repo: vx, vy, w                  20 Hz
-  (2) controller      Pose now; the walking policy next          500 Hz
+  (2) controller      Pose (stand, lie); PolicyWalker (WALK)     500 Hz, policy 50 Hz
   (3) safety          limits, and damping when it cannot trust   500 Hz
   (4) motor bus       MotorCmd out, BoardState in                500 Hz
         |
@@ -23,15 +23,17 @@ J4012
 | `go2_board/sim_bus.py` | `SimBus`: the bus over DDS in Unitree's format |
 | `go2_board/safety.py` | Clips targets to joint range and peak torque; damping, latched, on stale state, a fall or a failed controller |
 | `go2_board/controllers.py` | `Pose`: move smoothly to a pose and hold it |
+| `go2_board/walker.py` | `PolicyWalker`: the policy go2_train exported (`policy_spec.json`, `policy.npz`), in numpy. Checks the spec's samples on load, blends from STAND to the policy's pose and gains, runs it every 10th tick |
 | `go2_board/board.py` | The 500 Hz loop: read, controller, safety, write |
 | `go2_board/modes.py` | LIMP, STAND_UP, STAND, WALK, LIE_DOWN, and what may follow what |
 | `go2_board/link.py` | The brain link: UDP on localhost, commands in (`vx, vy, w`, mode), state out at 50 Hz |
 | `go2_board/app.py` | The board as a program: link, modes, safety and bus, one tick at a time |
+| `tools/sim2sim_mujoco.py` | A policy through Modes, PolicyWalker and safety in unitree_mujoco's Go2, headless, ~30 s: does it walk in a sim it did not train in? |
 | `tools/check_j4012.sh` | What a J4012 has (JetPack, kernel, CUDA, torch, network), read-only: run it on the board first |
 | `go2_board/livox.py` | Mid-360 packets (Livox SDK2 UDP) to points: CRC, udp_cnt gaps, frames; same code for the real sensor |
 | `go2_board/lidar.py` | The Mid-360 in use: a thread that levels each frame with the sensor's IMU, works out the free distance each way for the loop (`guard` limits the brain's velocity by it), and sends the cloud to the brain on 9872 (`CloudLink` is the brain's end) |
 | `scripts/board_main.py` | Run the board against the sim, waiting for the brain |
-| `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:1 lie:2` |
+| `scripts/brain_cli.py` | A stand-in brain: `stand:3 walk:5:0.5,0,0 lie:2` (mode:seconds[:vx,vy,w]) |
 | `scripts/run_board.py` | Stand up, hold, lie down, go limp, with no brain |
 | `scripts/livox_watch.py` | Print what the Mid-360 (real or go2_world's) is sending, once a second |
 
@@ -40,8 +42,8 @@ J4012
 ```
 conda activate unitree_sim
 mjpython ~/Work/unitree/go2_world/scripts/run_sim.py          # terminal 1: the sim's Go2
-python scripts/board_main.py                         # terminal 2: the board
-python scripts/brain_cli.py stand:3 lie:2            # terminal 3: a stand-in brain
+python scripts/board_main.py --policy policies/go2_flat_v1   # terminal 2: the board
+python scripts/brain_cli.py stand:3 walk:2 walk:5:0.5,0,0 stand:2 lie:2   # terminal 3
 python -m pytest -q                                  # no sim needed
 ```
 
@@ -78,8 +80,45 @@ puts the PC at 192.168.1.50; check the unit), so the J4012's Ethernet needs
 that address, or the sensor needs telling another. `livox.py` listens on every
 interface.
 
+## Walking policies
+
+`policies/<run>/` holds what go2_train exported (copy `logs/<run>/exported/`
+there; not in git). `board_main.py --policy` loads one; without it, WALK is
+refused. Before trusting a new one:
+
+```
+python tools/sim2sim_mujoco.py policies/<run>
+```
+
+`tools/sim2sim_mujoco.py` turns off the bars (x = 1.2, 1.6 m) and stairs
+(from 2.3 m) that unitree_mujoco's go2 `scene.xml` has in front of the dog;
+`--obstacles` keeps them. Earlier runs walked into the first bar and were
+read as failing to walk.
+
+| Command | v1 | v2 | v3 | v4 | **v5** |
+|---|---|---|---|---|---|
+| vx 0.5 | spins | +0.56 | +0.43 | +0.54 | **+0.53** |
+| vx 1.0 | spins | +1.04 | +0.95 | +1.02 | **+1.03** |
+| vx -0.5 | spins | -0.54 | -0.43 | -0.59 | **-0.61** |
+| vy 0.3 | spins | +0.27 | +0.16 | +0.28 | **+0.28** |
+| w 0.8 | spins | +0.56 | +0.49 | +0.56 | **+0.72** |
+| still | spins (-0.6 rad/s) | 0.00 | 0.00 | 0.00 | **0.00** |
+| max tilt | 21 deg | 4.7 deg | 6.0 deg | 4.7 deg | **4.3 deg** |
+
+v1 trained on Genesis' default joint armature (0.1, ten times the Go2
+model's); v2 on the Go2's joint dynamics, randomized; v3 adds feet rewards
+and tracks a little worse; v4 (v2 + 400 iterations) adds torsional friction
+at the feet, fixed at 0.02, which in Genesis resists spin far less than
+MuJoCo's 0.02; v5 (v4 + 400) draws it from 0.02-0.1 every second.
+**go2_flat_v5 is the one to use.** It turns at 90 % here; with the feet's
+torsional friction off (`--condim 3`) at +0.97, on 0.8 friction at +0.62.
+The real feet's spin resistance is unknown: expect turning to need tuning.
+
+`run_sim.py` loads the same scene with the bars in it: in the full sim,
+keep forward walks under ~1 m from the start.
+
 ## Not yet
 
-- The walking policy (a controller taking vx, vy, w): WALK is refused until one is loaded.
+- Turning depends on the feet's spin resistance (go2_flat_v5: 0.62-0.97 for 0.8).
 - A bus to real motor drivers.
 - Battery and temperature limits.
