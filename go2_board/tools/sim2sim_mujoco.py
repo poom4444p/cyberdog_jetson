@@ -37,6 +37,8 @@ ap.add_argument("policy")
 ap.add_argument("--armature", type=float, default=None, help="leg joints' armature (MuJoCo model: 0.01)")
 ap.add_argument("--friction", type=float, default=None, help="every geom's sliding friction (model: 0.4)")
 ap.add_argument("--no-joint-friction", action="store_true", help="leg joints' damping and frictionloss to 0")
+ap.add_argument("--obstacles", action="store_true",
+                help="keep scene.xml's bars and stairs (from x = 1.1 m); by default only the floor collides")
 ap.add_argument("--no-self-collision", action="store_true", help="robot geoms collide with the floor only (as Genesis trains)")
 ap.add_argument("--condim", type=int, default=None, help="feet's contact dimension (model: 6, with torsional and rolling friction)")
 args = ap.parse_args()
@@ -45,6 +47,13 @@ m = mujoco.MjModel.from_xml_path(XML)
 m.opt.timestep = 1.0 / RATE_HZ
 d = mujoco.MjData(m)
 mujoco.mj_resetDataKeyframe(m, d, m.key("home").id)
+if not args.obstacles:
+    # unitree_mujoco's scene.xml is not flat: 8 cm bars at x = 1.2 and 1.6 m,
+    # stairs from 2.3 m. A walker going forward meets them within seconds.
+    floor = m.geom("floor").id
+    for g in range(m.ngeom):
+        if m.geom_bodyid[g] == 0 and g != floor:
+            m.geom_contype[g] = m.geom_conaffinity[g] = 0
 if args.armature is not None:
     m.dof_armature[6:] = args.armature
 if args.friction is not None:
@@ -90,7 +99,7 @@ def run(modes, seconds, vel=(0.0, 0.0, 0.0), log=None):
 walker = PolicyWalker(args.policy)
 print(f"{walker.name} in {os.path.basename(XML)}: armature {m.dof_armature[6]:.3f}, "
       f"friction {m.geom_friction[-1, 0]:.2f}, joint frictionloss {m.dof_frictionloss[6]:.2f}, "
-      f"foot condim {m.geom_condim[m.geom('FR').id]}")
+      f"foot condim {m.geom_condim[m.geom('FR').id]}, obstacles {'on' if args.obstacles else 'off'}")
 modes = Modes(walker)
 modes.mode, modes.pose = "STAND", Pose(go2.STAND, 1.0)
 run(modes, 1.5)

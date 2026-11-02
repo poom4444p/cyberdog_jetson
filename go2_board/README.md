@@ -90,25 +90,31 @@ refused. Before trusting a new one:
 python tools/sim2sim_mujoco.py policies/<run>
 ```
 
-`go2_flat_v1` walks in Genesis but not here: it stays up, yet drifts and
-spins (-0.6 rad/s) whatever it is told. The board's observation matches
-Genesis' to 1e-7, so the board is not the cause. Genesis gives every joint
-an armature of 0.1, ten times unitree_mujoco's 0.01; with 0.1 set here
-(`--armature 0.1`) the spin is gone and backward, sideways, turning and
-standing track. Forward still does not.
+`tools/sim2sim_mujoco.py` turns off the bars (x = 1.2, 1.6 m) and stairs
+(from 2.3 m) that unitree_mujoco's go2 `scene.xml` has in front of the dog;
+`--obstacles` keeps them. Earlier runs walked into the first bar and were
+read as failing to walk.
 
-`go2_flat_v2` trains with the Go2's joint dynamics, randomized. It no longer
-spins here, but it does not walk either (|v| < 0.06 for every command): its
-front shins drag on the floor within 2 s. It shuffles in Genesis, and a
-shuffle depends on contact details the two simulators do not share.
-`go2_flat_v3` adds feet air time and clearance rewards: it barely moves at
-0.5 m/s here and falls at 1.0 m/s. The joints respond the same in both sims
-(base held, same step), and foot friction, condim, joint friction and
-self-collision change nothing (`--friction`, `--condim`, `--no-joint-friction`,
-`--no-self-collision`); go2_train's README has the details.
+| Command | go2_flat_v1 | go2_flat_v2 | go2_flat_v3 |
+|---|---|---|---|
+| vx 0.5 | spins | +0.56 | +0.43 |
+| vx 1.0 | spins | +1.04 | +0.95 |
+| vx -0.5 | spins | -0.54 | -0.43 |
+| vy 0.3 | spins | +0.27 | +0.16 |
+| w 0.8 | spins | +0.56 | +0.49 |
+| still | spins (-0.6 rad/s) | 0.00 | 0.00 |
+| max tilt | 21 deg | 4.7 deg | 6.0 deg |
+
+v1 trained on Genesis' default joint armature (0.1, ten times the Go2
+model's); v2 on the Go2's joint dynamics, randomized; v3 adds feet rewards
+and tracks a little worse. **go2_flat_v2 is the one to use**; it turns at
+70 % of what it is asked.
+
+`run_sim.py` loads the same scene with the bars in it: in the full sim,
+keep forward walks under ~1 m from the start.
 
 ## Not yet
 
-- A walking policy that passes sim2sim_mujoco.py (go2_flat_v1, v2 and v3 do not).
+- Turning tracks at 70 % (go2_flat_v2, w 0.8 -> 0.56).
 - A bus to real motor drivers.
 - Battery and temperature limits.
