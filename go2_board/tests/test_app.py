@@ -219,6 +219,31 @@ def test_link_drops_bad_datagrams_and_unknown_modes():
         board.close()
 
 
+def test_restarted_brain_is_heard_once_the_old_one_is_quiet():
+    import json
+    import socket
+    clock = Clock()
+    board = BoardLink(port=19876, brain_port=19877, clock=clock)
+    raw = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def send(seq, mode):
+        raw.sendto(json.dumps({"seq": seq, "vx": 0, "vy": 0, "w": 0, "mode": mode}).encode(),
+                   ("127.0.0.1", 19876))
+        time.sleep(0.02)
+        return board.poll()
+
+    try:
+        assert send(300, "walk").seq == 300
+        assert send(299, "lie").seq == 300            # late datagram while talking: dropped
+        clock.t += CMD_TIMEOUT_S + 0.01
+        c = send(1, "limp")                           # new brain, counting from 1
+        assert (c.seq, c.mode) == (1, "limp")
+        assert send(2, "stand").mode == "stand"
+    finally:
+        raw.close()
+        board.close()
+
+
 def test_silence_is_zero_velocity():
     clock = Clock()
     board = BoardLink(port=19874, brain_port=19875, clock=clock)
