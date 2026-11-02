@@ -27,6 +27,7 @@ J4012
 | `go2_board/modes.py` | LIMP, STAND_UP, STAND, WALK, LIE_DOWN, and what may follow what |
 | `go2_board/link.py` | The brain link: UDP on localhost, commands in (`vx, vy, w`, mode), state out at 50 Hz |
 | `go2_board/app.py` | The board as a program: link, modes, safety and bus, one tick at a time |
+| `tools/check_j4012.sh` | What a J4012 has (JetPack, kernel, CUDA, torch, network), read-only: run it on the board first |
 | `go2_board/livox.py` | Mid-360 packets (Livox SDK2 UDP) to points: CRC, udp_cnt gaps, frames; same code for the real sensor |
 | `go2_board/lidar.py` | The Mid-360 in use: a thread that levels each frame with the sensor's IMU, works out the free distance each way for the loop (`guard` limits the brain's velocity by it), and sends the cloud to the brain on 9872 (`CloudLink` is the brain's end) |
 | `scripts/board_main.py` | Run the board against the sim, waiting for the brain |
@@ -38,7 +39,7 @@ J4012
 
 ```
 conda activate unitree_sim
-mjpython ~/Work/unitree/scripts/run_sim.py          # terminal 1: the sim's Go2
+mjpython ~/Work/unitree/go2_world/scripts/run_sim.py          # terminal 1: the sim's Go2
 python scripts/board_main.py                         # terminal 2: the board
 python scripts/brain_cli.py stand:3 lie:2            # terminal 3: a stand-in brain
 python -m pytest -q                                  # no sim needed

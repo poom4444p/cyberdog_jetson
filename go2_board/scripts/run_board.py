@@ -3,7 +3,7 @@
   python scripts/run_board.py [--iface lo0] [--hold 3]
 
 The first end-to-end run of the board: SimBus, Safety and the Pose
-controller, against unitree_mujoco (~/Work/unitree/scripts/run_sim.py).
+controller, against unitree_mujoco (~/Work/unitree/go2_world/scripts/run_sim.py).
 """
 import argparse
 import time
