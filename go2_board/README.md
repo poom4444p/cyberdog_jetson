@@ -95,11 +95,15 @@ spins (-0.6 rad/s) whatever it is told. The board's observation matches
 Genesis' to 1e-7, so the board is not the cause. Genesis gives every joint
 an armature of 0.1, ten times unitree_mujoco's 0.01; with 0.1 set here
 (`--armature 0.1`) the spin is gone and backward, sideways, turning and
-standing track. Forward still does not. The next run trains with realistic
-armature, randomized.
+standing track. Forward still does not.
+
+`go2_flat_v2` trains with the Go2's joint dynamics, randomized. It no longer
+spins here, but it does not walk either (|v| < 0.06 for every command): its
+front shins drag on the floor within 2 s. It shuffles in Genesis, and a
+shuffle depends on contact details the two simulators do not share.
 
 ## Not yet
 
-- A walking policy that passes sim2sim_mujoco.py (go2_flat_v1 does not).
+- A walking policy that passes sim2sim_mujoco.py (go2_flat_v1 and v2 do not).
 - A bus to real motor drivers.
 - Battery and temperature limits.
