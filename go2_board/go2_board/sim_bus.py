@@ -19,6 +19,7 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_, SportMode
 from unitree_sdk2py.utils.crc import CRC  # noqa: E402
 
 from go2_board import go2  # noqa: E402
+from go2_board.fast_crc import lowcmd_crc  # noqa: E402
 from go2_board.bus import BoardState, MotorBus  # noqa: E402
 
 DOMAIN = 0                # the real Go2 and Unitree's examples use 0
@@ -69,7 +70,7 @@ class SimBus(MotorBus):
         for i, m in enumerate(self._msg.motor_cmd[:go2.N]):
             m.q, m.dq = float(cmd.q[i]), float(cmd.dq[i])
             m.kp, m.kd, m.tau = float(cmd.kp[i]), float(cmd.kd[i]), float(cmd.tau[i])
-        self._msg.crc = self._crc.Crc(self._msg)
+        self._msg.crc = lowcmd_crc(self._crc, self._msg)
         self._pub.Write(self._msg)
 
     def wait_for_state(self, timeout=5.0):
