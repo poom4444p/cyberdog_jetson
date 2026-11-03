@@ -29,8 +29,11 @@ def tilt(quat):
 
 
 class Safety:
-    def __init__(self):
+    def __init__(self, stale_s=STALE_S):
         self.tripped = None       # why it went to damping, or None
+        # Only a simulator on a busy desktop needs more (board_main --stale-ms):
+        # the motors' own 500 Hz never pauses like a Mac running four sims.
+        self.stale_s = stale_s
 
     def reset(self):
         self.tripped = None
@@ -40,7 +43,7 @@ class Safety:
         if state is None:
             return None                       # nothing known: send nothing yet
         if self.tripped is None:
-            if now - state.stamp > STALE_S:
+            if now - state.stamp > self.stale_s:
                 self.tripped = f"stale state ({(now - state.stamp) * 1e3:.0f} ms old)"
             elif tilt(state.quat) > TILT_MAX:
                 self.tripped = f"tilted {math.degrees(tilt(state.quat)):.0f} deg"
