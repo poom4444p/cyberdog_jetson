@@ -133,8 +133,15 @@ class FrameAssembler:
     may leave it standing still.
     """
 
+    # The sensor's clock is time since its power-on: further back than this is
+    # a sensor that started again (power blip, or the emulator restarted), not
+    # a late packet. Dropping those as late left the board blind until the new
+    # clock caught up with the old one: in HIL, a minute and more.
+    RESTART_NS = 1_000_000_000
+
     def __init__(self, keep_empty=False, frame_ns=100_000_000):
         self.keep_empty, self.frame_ns = keep_empty, frame_ns
+        self.restarts = 0
         self.parts, self.next_cnt, self.start = [], 0, 0
         self.frame_cnt, self.missing, self.last_t = 0, 0, -1
         self.longest = 0
@@ -144,6 +151,9 @@ class FrameAssembler:
     def feed(self, pkt):
         """Returns the frame this packet closed, or None."""
         done = None
+        if self.parts and pkt.timestamp < self.start - self.RESTART_NS:
+            self.parts, self.restarts = [], self.restarts + 1   # the open frame is of the old clock
+            self._prev_frame_cnt = None
         if self.parts:
             span = pkt.time_interval * 100                  # ns, one packet's worth of points
             if pkt.timestamp < self.start - span // 2:      # from a frame already closed
