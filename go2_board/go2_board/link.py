@@ -32,10 +32,10 @@ class Command:
         self.mode, self.seq, self.stamp = mode, seq, stamp
 
 
-def _socket(port):
+def _socket(port, host=HOST):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((HOST, port))
+    s.bind((host, port))
     s.setblocking(False)
     return s
 
@@ -43,9 +43,13 @@ def _socket(port):
 class BoardLink:
     """The board's end: polled once a tick, never blocks."""
 
-    def __init__(self, port=BOARD_PORT, brain_port=BRAIN_PORT, clock=time.monotonic):
-        self.sock = _socket(port)
-        self.brain = (HOST, brain_port)
+    def __init__(self, port=BOARD_PORT, brain_port=BRAIN_PORT, clock=time.monotonic,
+                 listen=HOST, brain_host=HOST):
+        """`listen` is the address the board takes commands on: localhost when
+        the brain runs on the board, the board's own address on one link
+        (never 0.0.0.0) when it runs on another machine, as in HIL."""
+        self.sock = _socket(port, listen)
+        self.brain = (brain_host, brain_port)
         self.clock = clock
         self.last = Command()
 
@@ -90,9 +94,9 @@ class BoardLink:
 class BrainLink:
     """The brain's end (Cyberdog's Go2 robot class uses this)."""
 
-    def __init__(self, port=BRAIN_PORT, board_port=BOARD_PORT):
-        self.sock = _socket(port)
-        self.board = (HOST, board_port)
+    def __init__(self, port=BRAIN_PORT, board_port=BOARD_PORT, listen=HOST, board_host=HOST):
+        self.sock = _socket(port, listen)
+        self.board = (board_host, board_port)
         self.seq = 0
         self.state = None
 

@@ -255,3 +255,28 @@ def test_silence_is_zero_velocity():
         assert board.velocity() == (0.0, 0.0, 0.0)
     finally:
         board.close()
+
+
+def test_link_between_two_addresses():
+    # HIL: board and brain each on their own address (two loopback ones here;
+    # Linux has all of 127/8, macOS only 127.0.0.1 unless aliased)
+    import socket
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("127.0.0.2", 0))
+    except OSError:
+        pytest.skip("no 127.0.0.2 on this machine")
+    finally:
+        probe.close()
+    board = BoardLink(port=19890, brain_port=19891, listen="127.0.0.1", brain_host="127.0.0.2")
+    brain = BrainLink(port=19891, board_port=19890, listen="127.0.0.2", board_host="127.0.0.1")
+    try:
+        brain.send(0.2, 0.0, 0.1, "walk")
+        time.sleep(0.05)
+        assert board.poll().vx == 0.2
+        board.send_state(mode="WALK")
+        time.sleep(0.05)
+        assert brain.poll() == {"mode": "WALK"}
+    finally:
+        board.close()
+        brain.close()

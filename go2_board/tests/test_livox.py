@@ -181,3 +181,12 @@ def test_receiver_over_loopback():
     finally:
         tx.close()
         rx.close()
+
+
+def test_a_sensor_that_starts_again_is_followed_not_dropped():
+    # time since power-on: a restart sends the clock back to zero mid-frame
+    a = FrameAssembler()
+    old = feed_all(a, frame(60_000) + frame(60_100)[:3])          # a frame open when it stopped
+    new = feed_all(a, frame(0) + frame(100) + frame(200))
+    assert len(old) == 1 and a.restarts == 1
+    assert len(new) == 2 and new[0].stamp == 0 and new[0].packets == 5 and a.late == 0
