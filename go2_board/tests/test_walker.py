@@ -249,3 +249,31 @@ def test_modes_stand_walk_stand_with_the_policy(tmp_path):
     np.testing.assert_allclose(first.q, s.q)              # no jump: it blends back
     end = m.step(s, t + WALK_TO_STAND_S + DT)
     np.testing.assert_allclose(end.q, go2.STAND)
+
+
+def test_policy_steps_by_the_clock_whatever_the_loop_rate(tmp_path):
+    write_policy(tmp_path)
+    w = PolicyWalker(str(tmp_path))
+    s = state(q=DEFAULT)
+    for rate in (500.0, 430.0, 300.0):              # ticks per second the loop manages
+        w.reset()
+        t0 = past_blend(w, s)
+        runs, last = 0, None
+        t = t0
+        while t < t0 + 2.0:
+            w.step(s, t, 0.3, 0.0, 0.0)
+            if w.action is not last:
+                runs, last = runs + 1, w.action
+            t += 1.0 / rate
+        assert abs(runs / 2.0 - 1 / w.period) <= 2, (rate, runs)   # ~50 a second at any rate
+
+
+def test_a_long_stall_is_not_made_up_with_a_burst(tmp_path):
+    write_policy(tmp_path)
+    w = PolicyWalker(str(tmp_path))
+    s = state(q=DEFAULT)
+    t = past_blend(w, s)
+    w.step(s, t, 0.3, 0.0, 0.0)
+    first = w.next_t
+    w.step(s, t + 0.2, 0.3, 0.0, 0.0)              # 200 ms late: one step, rescheduled from now
+    assert w.next_t == pytest.approx(t + 0.2 + w.period) and w.next_t > first
