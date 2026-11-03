@@ -11,6 +11,8 @@ runs that policy; without one, "walk" is refused.
 import argparse
 
 from go2_board.app import App
+from go2_board.board import Board
+from go2_board.safety import STALE_S
 from go2_board.lidar import Lidar
 from go2_board.sim_bus import SimBus
 from go2_board.walker import PolicyWalker
@@ -20,6 +22,10 @@ ap.add_argument("--iface", default=None, help="DDS interface (default lo0 on mac
 ap.add_argument("--seconds", type=float, default=None, help="stop after this long (default: run)")
 ap.add_argument("--no-lidar", action="store_true", help="no Mid-360: velocity is not limited")
 ap.add_argument("--policy", default=None, help="walking policy folder (policy_spec.json, policy.npz)")
+ap.add_argument("--stale-ms", type=float, default=None,
+                help="SIM ONLY: go limp after this long without a LowState (default %.0f ms). "
+                     "A Mac running the sim, VAMOS and the brain pauses for longer now and then; "
+                     "the real dog's motors do not" % (STALE_S * 1e3))
 args = ap.parse_args()
 
 walker = None
@@ -31,7 +37,11 @@ if args.policy:
 bus = SimBus(args.iface) if args.iface else SimBus()
 bus.wait_for_state()
 lidar = None if args.no_lidar else Lidar().start()
-app = App(bus, lidar=lidar, walker=walker)
+stale_s = STALE_S if args.stale_ms is None else args.stale_ms / 1e3
+if stale_s != STALE_S:
+    print(f"[board] WARNING: stale-state limit {stale_s * 1e3:.0f} ms, not {STALE_S * 1e3:.0f}: "
+          "for a simulator only, never on the dog")
+app = App(bus, lidar=lidar, walker=walker, board=Board(bus, stale_s=stale_s))
 print("[board] up, LIMP; waiting for the brain on udp 127.0.0.1:9870"
       + ("" if lidar is None else "; Mid-360 on udp 56301, clouds to 9872"))
 try:

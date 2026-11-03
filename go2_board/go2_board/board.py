@@ -7,18 +7,19 @@ elsewhere and hands this loop a target; nothing here waits on it.
 import time
 
 from go2_board.bus import MotorCmd
-from go2_board.safety import Safety
+from go2_board.safety import STALE_S, Safety
 
 RATE_HZ = 500
 LATE_S = 0.01             # a tick this far behind schedule is counted as late
 
 
 class Board:
-    def __init__(self, bus, rate_hz=RATE_HZ, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, bus, rate_hz=RATE_HZ, clock=time.monotonic, sleep=time.sleep,
+                 stale_s=STALE_S):
         self.bus = bus
         self.dt = 1.0 / rate_hz
         self.clock, self.sleep = clock, sleep
-        self.safety = Safety()
+        self.safety = Safety(stale_s)
         self.stats = {"ticks": 0, "late": 0, "sent": 0}
 
     def tick(self, controller):

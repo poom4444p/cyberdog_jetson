@@ -162,3 +162,12 @@ def test_go_limp_leaves_damping_on_the_bus():
     bus = FakeBus(state())
     Board(bus, clock=clock, sleep=clock.sleep).go_limp(0.1)
     assert bus.sent and all(np.all(c.kp == 0) for c in bus.sent)
+
+
+def test_stale_limit_can_be_raised_for_a_simulator():
+    hold = MotorCmd.hold(go2.STAND, 60, 5)
+    safety = Safety(stale_s=0.2)
+    assert safety.filter(hold, state(stamp=1.0), now=1.1) is not None and safety.tripped is None
+    safety.filter(hold, state(stamp=1.0), now=1.21)
+    assert safety.tripped.startswith("stale state")
+    assert Safety().stale_s == STALE_S and Board(FakeBus(), stale_s=0.2).safety.stale_s == 0.2
