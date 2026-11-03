@@ -27,6 +27,13 @@ from go2_board.bus import MotorCmd
 
 BLEND_S = 1.0
 FORMAT = "go2_train/1"
+# How fast the commanded velocity may change: vx, vy (m/s^2), w (rad/s^2).
+# The brain's commands are steps (0 to 0.54 m/s and 0.47 rad/s the instant the
+# blend ended, standing still), and the board, not the brain, owns what the
+# legs are asked: a step to 0.8 m/s and 1 rad/s from standing tipped the dog
+# 21 deg in unitree_mujoco, and with the loop at 430 Hz on a busy J4012 one
+# such start fell. Ramped at these, the same starts stay near level.
+CMD_ACCEL = (1.0, 1.0, 2.0)
 
 
 def projected_gravity(quat):
@@ -129,7 +136,9 @@ class PolicyWalker:
             return MotorCmd.hold(q, kp, kd)
 
         if self.ticks % self.decimation == 0:
-            self.command = np.clip([vx, vy, w], self.cmd_lo, self.cmd_hi)
+            want = np.clip([vx, vy, w], self.cmd_lo, self.cmd_hi)
+            step = np.asarray(CMD_ACCEL) * self.decimation / RATE_HZ
+            self.command = self.command + np.clip(want - self.command, -step, step)
             obs = self.observation(state, self.command)
             act = np.clip(mlp(self.weights, obs).astype(float), -self.action_clip, self.action_clip)
             if not np.all(np.isfinite(act)):

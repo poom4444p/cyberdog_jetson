@@ -167,12 +167,36 @@ def test_without_latency_the_action_lands_at_once(tmp_path):
     np.testing.assert_allclose(out.q, np.array(DEFAULT) + 0.25 * w.action)
 
 
+def ticks(w, s, t, n, vel):
+    for _ in range(n):
+        w.step(s, t, *vel)
+        t += DT
+    return t
+
+
 def test_commands_are_clipped_to_what_it_trained_on(tmp_path):
     write_policy(tmp_path)
     w = PolicyWalker(str(tmp_path))
     s = state(q=DEFAULT)
-    w.step(s, past_blend(w, s), 3.0, -2.0, 5.0)
+    ticks(w, s, past_blend(w, s), 1000, (3.0, -2.0, 5.0))       # 2 s: ramped all the way
     np.testing.assert_allclose(w.command, [1.0, -0.4, 1.0])
+
+
+def test_command_ramps_from_standing_and_on_every_step_change(tmp_path):
+    from go2_board.walker import CMD_ACCEL
+    write_policy(tmp_path)
+    w = PolicyWalker(str(tmp_path))
+    s = state(q=DEFAULT)
+    t = past_blend(w, s)
+    per_policy_step = np.asarray(CMD_ACCEL) * w.decimation * DT
+    w.step(s, t, 0.8, 0.0, 1.0)                     # a step from standing still
+    np.testing.assert_allclose(w.command, [per_policy_step[0], 0.0, per_policy_step[2]])
+    t = ticks(w, s, t + DT, 1000, (0.8, 0.0, 1.0))
+    np.testing.assert_allclose(w.command, [0.8, 0.0, 1.0])
+    ticks(w, s, t, w.decimation, (0.0, 0.0, 0.0))  # a stop is eased too, not slammed
+    np.testing.assert_allclose(w.command, [0.8 - per_policy_step[0], 0.0, 1.0 - per_policy_step[2]])
+    w.reset()
+    assert not w.command.any()                      # every WALK starts from standing
 
 
 def test_reset_starts_the_blend_again(tmp_path):
