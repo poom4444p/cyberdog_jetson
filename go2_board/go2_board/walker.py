@@ -8,9 +8,13 @@ refuses a policy that does not give the same answers.
 
 On entering WALK it first blends, over BLEND_S, from wherever the legs are
 (STAND) to the pose the policy was trained around, with the gains easing
-from STAND's to the policy's. Then, every `decimation` ticks (10 at 500 Hz
-for a 50 Hz policy) it builds the observation, runs the policy and holds
-the new targets until the next one.
+from STAND's to the policy's. Then, every policy_dt of the board's clock
+(20 ms for a 50 Hz policy: `decimation` ticks of a loop on time) it builds
+the observation, runs the policy and holds the new targets until the next
+one. By the clock, not by counting ticks: on a busy J4012 the loop ran at
+430 Hz, a tick-counted policy at 43 Hz, slower than it was trained to step,
+and turning on the spot near the start it fell. A late tick is not made up
+with a burst of policy steps.
 
 Training applied each action one policy step late (Genesis' stand-in for
 the real robot's delay); so does this walker, when the spec says so.
@@ -27,6 +31,13 @@ from go2_board.bus import MotorCmd
 
 BLEND_S = 1.0
 FORMAT = "go2_train/1"
+# How fast the commanded velocity may change: vx, vy (m/s^2), w (rad/s^2).
+# The brain's commands are steps (0 to 0.54 m/s and 0.47 rad/s the instant the
+# blend ended, standing still), and the board, not the brain, owns what the
+# legs are asked: a step to 0.8 m/s and 1 rad/s from standing tipped the dog
+# 21 deg in unitree_mujoco, and with the loop at 430 Hz on a busy J4012 one
+# such start fell. Ramped at these, the same starts stay near level.
+CMD_ACCEL = (1.0, 1.0, 2.0)
 
 
 def projected_gravity(quat):
@@ -69,6 +80,7 @@ class PolicyWalker:
         if abs(ratio - round(ratio)) > 1e-6 or round(ratio) < 1:
             raise ValueError(f"policy_dt {spec['policy_dt']} is not a whole number of {rate_hz} Hz ticks")
         self.decimation = int(round(ratio))
+        self.period = float(spec["policy_dt"])     # s between policy steps, by the clock
         self.obs_scale = {o["name"]: np.array(o["scale"], float) for o in spec["observation"]}
         self.obs_order = [(o["name"], o["size"]) for o in spec["observation"]]
         self.obs_size = spec["observation_size"]
@@ -94,6 +106,7 @@ class PolicyWalker:
         """Called by Modes on entering WALK."""
         self.ticks = 0
         self.t0 = None
+        self.next_t = None                  # when the next policy step is due
         self.start = None
         self.action = np.zeros(go2.N)       # the policy's last output (an input to the next)
         self.applied = np.zeros(go2.N)      # the action the targets come from
@@ -128,8 +141,14 @@ class PolicyWalker:
             kd = (1 - a) * go2.KD_STAND + a * self.kd
             return MotorCmd.hold(q, kp, kd)
 
-        if self.ticks % self.decimation == 0:
-            self.command = np.clip([vx, vy, w], self.cmd_lo, self.cmd_hi)
+        if self.next_t is None or t >= self.next_t - 1e-6:
+            # Due: the next one a period on, or a period from now if this tick
+            # came so late that the schedule is gone (never two at once).
+            self.next_t = t + self.period if self.next_t is None or t - self.next_t > self.period \
+                else self.next_t + self.period
+            want = np.clip([vx, vy, w], self.cmd_lo, self.cmd_hi)
+            step = np.asarray(CMD_ACCEL) * self.period
+            self.command = self.command + np.clip(want - self.command, -step, step)
             obs = self.observation(state, self.command)
             act = np.clip(mlp(self.weights, obs).astype(float), -self.action_clip, self.action_clip)
             if not np.all(np.isfinite(act)):
