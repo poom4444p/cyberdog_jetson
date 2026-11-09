@@ -25,9 +25,15 @@ class Board:
     def board_clearance(self):
         return self.free
 
+    def now(self):
+        return 0.0
+
 
 class Twin:
     """MujocoRobot: no guard of its own."""
+
+    def now(self):
+        return 0.0
 
 
 def oncoming():
@@ -40,7 +46,7 @@ def oncoming():
 def run_with(robot):
     said = []
     run = types.SimpleNamespace(robot=robot, evading=0.0, evade={"steps": 0, "ticks": 0},
-                                say=said.append)
+                                evade_said=(-math.inf, 0.0), say=said.append)
     run.handler_room = rb.Run.handler_room.__get__(run)
     run.step_aside = rb.Run.step_aside.__get__(run)
     return run, said
@@ -75,3 +81,18 @@ def test_blind_board_gets_no_step():
 def test_the_twin_has_no_guard_and_steps_as_before():
     run, _ = run_with(Twin())
     assert run.step_aside(Live(), [oncoming()], (0.0, 0.0, 0.0)) == rb.SIDE_V
+
+
+
+def test_a_flickering_step_aside_is_said_once_until_it_changes_side():
+    # The track drops out for a tick and the step comes back: said once, not
+    # every time (HIL 11-09 15:27: "stepping to your left" 3 times in 3 s).
+    run, said = run_with(Twin())
+    for _ in range(3):
+        run.evading = 0.0                      # the tick it dropped out
+        assert run.step_aside(Live(), [oncoming()], (0.0, 0.0, 0.0)) == rb.SIDE_V
+    assert said == ["Someone close. Stepping to your left."]
+    run.evade_said = (0.0, -1.0)               # had it been "right" last, a left is said
+    run.evading = 0.0
+    run.step_aside(Live(), [oncoming()], (0.0, 0.0, 0.0))
+    assert len(said) == 2

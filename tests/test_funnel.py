@@ -35,3 +35,15 @@ def test_a_little_off_the_axis_the_funnel_is_unchanged():
 def test_past_the_doorway_or_far_from_it_the_target_stands():
     assert aim((45.0, 6.0)) == ((45.0, 4.0), False)  # through it already
     assert aim((40.0, 9.0)) == ((45.0, 4.0), False)  # 5 m along the corridor
+
+
+def test_door_through_is_past_the_far_side_while_lined_up_for_it():
+    # What the LiDAR finds beyond it is in the next room (HIL 11-09 14:55: the
+    # server room's racks, 3-5 m in, turned into "stepping around it" at the door).
+    x, y = rb.Run.door_through([GATE], (45.0, 9.05))
+    assert x == AXIS_X and abs(y - (GATE[1][1] - rb.FUNNEL_PAST)) < 1e-9
+
+
+def test_no_door_through_far_from_a_doorway_or_once_past_it():
+    assert rb.Run.door_through([GATE], (40.0, 9.0)) is None   # 5 m along the corridor
+    assert rb.Run.door_through([GATE], (45.0, 6.0)) is None   # in the room already
