@@ -310,6 +310,18 @@ SWING_NOSE = 0.30         # metres ahead of the dog's centre its front legs reac
                           # only the centre: seed 8 of room 201 --pedestrians 3
                           # kept 0.18 m at the centre and put its front legs on
                           # the floor-2 cart's corner.
+EASE_AHEAD = 0.50         # metres beyond the front, at the end of the roll-out,
+                          # that an eased command walking on where the plan
+                          # pivoted must find clear. It is asked again every
+                          # tick, so it walks on for as long as the turn is
+                          # eased, not for SWING_T: pushed to the south wall by
+                          # a sidestep, 1.2 m short of the floor-1 lift and 55
+                          # deg right of it, the dog walked straight at the
+                          # shaft's corner at 0.3 m/s until the board's guard
+                          # closed the front (BOARD_NEAR_M), then crept left at
+                          # 0.03 m/s for 10 s and overshot into the lift's mouth
+                          # (HIL 11-09 13:02). More than BOARD_NEAR_M, so an
+                          # easing the guard will stop is never chosen.
 NOSE_MIN = 0.15           # metres from the dog's front (SWING_NOSE ahead) to
                           # anything the LiDAR found, below which it turns
                           # before it walks on. The proximity stop reads the
@@ -1426,14 +1438,15 @@ class Run:
         y += cmd[0] * math.sin(yaw) * dt
         return any(a < NOSE_MIN and b < a for a, b in zip(now, corners(x, y, yaw)))
 
-    def swing(self, live, pose, cmd, people=(), dt=0.1, need=ROBOT_R):
+    def swing(self, live, pose, cmd, people=(), dt=0.1, need=ROBOT_R, ahead=0.0):
         """Roll `cmd` forward SWING_T: (least room around the person, whether
         the dog itself stays clear -- of everything by `need`, and of where
         each of `people` is heading by SWING_PEOPLE, or by as much as it has
         now if that is less: someone stopped 0.55 m in front of it would
         otherwise rule out stepping away from them too -- and least room
         between the person and the walls alone, and least room the dog's
-        centre or front had along the way)."""
+        centre or front had along the way). With `ahead`, the line that far
+        beyond the front at the end must be clear by `need` too (EASE_AHEAD)."""
         x, y, yaw = pose
         vx, vy, w = cmd
         keep = [min(SWING_PEOPLE, math.dist((x, y), (p.x, p.y)) - 1e-6) for p in people]
@@ -1450,6 +1463,10 @@ class Run:
             clear = (clear and body >= need
                      and all(math.dist((x, y), p.predict(k * dt)) >= d
                              for p, d in zip(people, keep)))
+        steps = int(round(ahead / dt))
+        for k in range(1, steps + 1):
+            d = SWING_NOSE + ahead * k / steps
+            clear = clear and live(x + d * math.cos(yaw), y + d * math.sin(yaw)) >= need
         return worst, clear, walls, body
 
     def spare_handler(self, live, pose, cmd, limit, people=()):
@@ -1506,7 +1523,7 @@ class Run:
         for f in SWING_EASE:
             alt = (v, vy, w * f)
             room, clear, aw, _ = self.swing(live, pose, alt, people if v > vx else (),
-                                            need=need)
+                                            need=need, ahead=EASE_AHEAD if v > vx else 0.0)
             if not clear:
                 continue
             if ok(room, aw):
