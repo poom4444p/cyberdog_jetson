@@ -356,6 +356,16 @@ HOLD_TURN_S = 3.0         # seconds a turn that would put the person on the hand
 FUNNEL_D = 2.0            # metres before a doorway the funnel takes over
 FUNNEL_LEAD = 0.8         # metres ahead on the axis it steers at
 FUNNEL_PAST = 0.4         # metres beyond the doorway's far side it lets go
+FUNNEL_ANGLE = math.radians(45)   # steepest approach to the axis point it steers at;
+FUNNEL_PRE = 0.5          # beyond it, the point is this far before the doorway.
+                          # From well to the side the point FUNNEL_LEAD ahead is
+                          # in the doorway, and the line to it crosses the frame:
+                          # out of the floor-3 lift the dog walked 1.6 m west
+                          # (easing the turn for the person on the handle), came
+                          # back for the server room at 27 deg to the wall, and
+                          # put its nose into the door's west jamb -- the board's
+                          # guard held it there 30 s (HIL 11-09 13:25, 13:42).
+                          # Lined up in the corridor first, it walks in square.
 DOOR_MAP_D = 4.0          # metres from a doorway on the route inside which the
                           # map's route steers, not a VAMOS path. The route
                           # starts crossing the corridor for a door about this
@@ -1376,6 +1386,8 @@ class Run:
             if abs(lateral) > FUNNEL_D:
                 break
             ahead = min(s + FUNNEL_LEAD, depth + FUNNEL_PAST)
+            if abs(lateral) > (ahead - s) * math.tan(FUNNEL_ANGLE):
+                ahead = min(ahead, -FUNNEL_PRE)          # line up before the frame
             return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
         return target, False
 
