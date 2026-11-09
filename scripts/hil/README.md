@@ -127,6 +127,12 @@ uses are: those need go2_board's own check (`tests/test_sim_bus.py`).
 - **`WORLD_ARGS=--held-pd`**: go2_world's motors as unitree_mujoco has them (the
   torque worked out once per command and held) instead of every physics step.
 - **Cores**: `BOARD_CORES` (6,7) and `BRAIN_CORES` (0-5) in `onboard.sh`.
+- **`RECORD=1`**: go2_world records the run to `output/hil/<time>-<walk|route>/world.mp4`
+  (a camera chasing the dog, world time and position on each frame). Needs
+  go2_world's `record` extra in `PY`'s env (`pip install -e ~/Work/unitree/go2_world[record]`).
+  It costs the physics nothing measurable (route 11-09: lowstate max 8.5 ms).
+- **`VIEWER=1`**: run the world in MuJoCo's viewer (`mjpython` next to `PY`)
+  instead of headless. Watch the stale trips: the viewer makes the world pause more.
 
 ## The board's clock
 

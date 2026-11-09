@@ -24,6 +24,11 @@
 #   PY           Python with go2_world's packages   (python)
 #   PEOPLE       people walking in the world        (4)
 #   WORLD_ARGS   more run_world arguments, e.g. --held-pd
+#   VIEWER=1     the world with MuJoCo's viewer (mjpython next to PY), to watch or
+#                screen-record a run; it can hold the physics long enough to trip
+#                the board's stale-state guard, so headless is the default
+#   RECORD=1     go2_world records the run to $OUT/world.mp4 (offscreen, chase camera;
+#                needs go2_world's [record] extra in PY's environment)
 #   TRACE=1      the brain prints its commands
 #   ROUTE_S      a route is stopped after this long, in seconds  (560)
 set -u
@@ -39,6 +44,8 @@ REMOTE=${REMOTE:-cyberdog_jetson}
 PY=${PY:-python}
 PEOPLE=${PEOPLE:-4}
 WORLD_ARGS=${WORLD_ARGS:-}
+VIEWER=${VIEWER:-0}
+RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
@@ -68,14 +75,27 @@ check_clock() {
 # ours -- a backgrounded `cd && prog` keeps a shell holding our stdout, and
 # whatever reads it (a pipe, ssh) waits for it to end. And [x]yz patterns, so
 # pkill -f matches the process and not a shell whose command line holds it.
-stop_world() { pkill -f "scripts/[r]un_world.py"; pkill -f "scripts/[r]un_lidar.py"; }
+stop_world() {
+    pkill -f "scripts/[r]un_world.py"; pkill -f "scripts/[r]un_lidar.py"
+    # A recording world finishes its MP4 on SIGTERM: give it a moment.
+    for _ in 1 2 3 4 5 6; do pgrep -f "scripts/[r]un_world.py" > /dev/null || break; sleep 0.5; done
+}
 
 start_world() {
     stop_world
     on_board "$ONBOARD stop" > /dev/null 2>&1
     sleep 1
     # shellcheck disable=SC2086
-    (cd "$GO2_WORLD" || exit 1; nohup "$PY" -u scripts/run_world.py --headless --people="$PEOPLE" \
+    local world=("$PY" -u scripts/run_world.py --headless)
+    if [ "$VIEWER" = 1 ]; then
+        # The viewer needs mjpython on macOS: the one in PY's environment.
+        local mjpy; mjpy="$(dirname "$(command -v "$PY")")/mjpython"
+        [ -x "$mjpy" ] || { echo "VIEWER=1: no mjpython next to $PY"; exit 1; }
+        world=("$mjpy" -u scripts/run_world.py)
+        echo "world: with the viewer (double-click the dog, then Ctrl+right double-click to follow it)"
+    fi
+    [ "$RECORD" = 1 ] && world+=(--record="$OUT/world.mp4")
+    (cd "$GO2_WORLD" || exit 1; nohup "${world[@]}" --people="$PEOPLE" \
         --lift-listen="$MAC_IP" $WORLD_ARGS "$MAC_IF" > "$OUT/world.log" 2>&1 < /dev/null &)
     for _ in $(seq 1 30); do grep -q "people walking" "$OUT/world.log" 2>/dev/null && break; sleep 0.5; done
     grep -q "people walking" "$OUT/world.log" || { echo "world: did not start, see $OUT/world.log"; exit 1; }
