@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "go2_board"
+version = "0.1.0"
+description = "The Go2's one board: motor bus, safety and controllers, below the Cyberdog brain"
+requires-python = ">=3.8"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# SimBus: DDS in Unitree's format. cyclonedds is pinned by unitree_sdk2_python.
+dds = ["cyclonedds==0.10.2"]
+dev = ["pytest>=7.0.0"]
+
+[tool.setuptools]
+packages = ["go2_board"]
