@@ -21,7 +21,9 @@ on the Mac. They talk over the USB-C link, in the messages a real Go2 speaks.
 
 ## Setting up a fresh J4012
 
-Once, after flashing JetPack 6.2. The board needs the internet for the installs.
+Once, after flashing JetPack 6.2. The board needs the internet for the apt and
+pip installs of the environments; on the rig it has none (only the USB-C link
+to the Mac), so this repo's own packages are installed offline, last.
 
 ```
 # Mac: ssh without a password (the scripts use BatchMode)
@@ -44,12 +46,38 @@ python3 -m venv ~/vamosenv && . ~/vamosenv/bin/activate
 pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
 pip install "numpy<2" transformers==5.17.0 peft==0.20.0 accelerate==1.15.0 fastapi uvicorn python-multipart pillow huggingface_hub
 
-# Mac: this repo (go2_board/ and its go2_flat_v5 policy are in it), VAMOS's server and weights
+# Mac: a setuptools new enough for editable installs (see below), from the Mac's internet
+pip download --no-deps --only-binary=:all: --python-version 3.10 setuptools==75.8.0 -d /tmp/wheels
+scp /tmp/wheels/setuptools-75.8.0-py3-none-any.whl jittarin@192.168.55.1:/tmp/
+ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; pip install --no-index /tmp/setuptools-75.8.0-py3-none-any.whl'
+
+# Mac: this repo (go2_board/ and its go2_flat_v5 policy are in it), installed with no internet
 bash scripts/hil/run_hil.sh sync
-ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; pip install -e ~/cyberdog_jetson/go2_board[dev] -e ~/cyberdog_jetson; mkdir -p ~/vamos ~/.cache/huggingface/hub'
+ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; pip install --no-deps --no-build-isolation -e ~/cyberdog_jetson/go2_board -e ~/cyberdog_jetson'
+
+# Mac: the Go2 model, then the building scene built on the board (output/ is not synced)
+ssh jittarin@192.168.55.1 'mkdir -p ~/mujoco_menagerie'
+rsync -a "${MENAGERIE_PATH:-$HOME/mujoco_menagerie}/unitree_go2" jittarin@192.168.55.1:~/mujoco_menagerie/
+ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; cd ~/cyberdog_jetson && python -m cyberdog.sim.scene.build_scene --building'
+
+# Mac: VAMOS's server and weights
+ssh jittarin@192.168.55.1 'mkdir -p ~/vamos ~/.cache/huggingface/hub'
 rsync -a --exclude __pycache__ vendor/VAMOS/server jittarin@192.168.55.1:~/vamos/
 rsync -a ~/.cache/huggingface/hub/models--mateoguaman--vamos jittarin@192.168.55.1:~/.cache/huggingface/hub/
 ```
+
+Why the setuptools step and the two flags: `pip install -e` normally builds in
+an isolated environment and downloads `setuptools>=64` into it, which fails
+with no internet ("Failed to build ... when installing build dependencies").
+`--no-build-isolation` uses the venv's own setuptools instead, but Ubuntu
+22.04's venv comes with 59.6, which has no PEP 660 `build_editable` hook
+("missing the 'build_editable' hook"); 75.8.0 has it. `--no-deps` keeps pip
+from looking for the packages already installed above. After a sync that
+changes `pyproject.toml`, run the install line again.
+
+`output/scene_cache/building.xml` is what the brain walks in; it names the
+board's own `~/mujoco_menagerie`, so it is built there, not copied from the
+Mac. Rebuild it after moving the menagerie or changing the building.
 
 Then `run_hil.sh clock`, `walk` and `route`, as below. To switch the board off:
 `ssh -t jittarin@192.168.55.1 'sudo shutdown -h now'`, and wait for it to go dark.
