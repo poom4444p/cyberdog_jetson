@@ -3,7 +3,7 @@
 # physics, people, the lift, the Mid-360), everything the dog carries on the
 # J4012 over USB-C (scripts/hil/onboard.sh there). See scripts/hil/README.md.
 #
-#   bash scripts/hil/run_hil.sh sync              copy Cyberdog and go2_board, as checked out, to the board
+#   bash scripts/hil/run_hil.sh sync              copy this repo (brain and go2_board/), as checked out, to the board
 #   bash scripts/hil/run_hil.sh clock             set the board's clock from this Mac (sudo there)
 #   bash scripts/hil/run_hil.sh walk              stand, walk 4 s, stand: is the board's loop sound? (~1 min)
 #   bash scripts/hil/run_hil.sh route DEST [N]    the whole route to DEST, VAMOS asked for N paths (2)
@@ -20,7 +20,7 @@
 #   MAC_IP       this Mac's address on the link     (192.168.55.100)
 #   BOARD_IF     the board's interface on the link  (l4tbr0)
 #   GO2_WORLD    the go2_world checkout             (~/Work/unitree/go2_world)
-#   GO2_BOARD    the go2_board checkout             (~/Work/unitree/go2_board)
+#   REMOTE       this repo on the board, under ~    (cyberdog_jetson)
 #   PY           Python with go2_world's packages   (python)
 #   PEOPLE       people walking in the world        (4)
 #   WORLD_ARGS   more run_world arguments, e.g. --held-pd
@@ -35,12 +35,12 @@ MAC_IF=${MAC_IF:-en9}
 MAC_IP=${MAC_IP:-192.168.55.100}
 BOARD_IF=${BOARD_IF:-l4tbr0}
 GO2_WORLD=${GO2_WORLD:-$HOME/Work/unitree/go2_world}
-GO2_BOARD=${GO2_BOARD:-$HOME/Work/unitree/go2_board}
+REMOTE=${REMOTE:-cyberdog_jetson}
 PY=${PY:-python}
 PEOPLE=${PEOPLE:-4}
 WORLD_ARGS=${WORLD_ARGS:-}
 TRACE=${TRACE:-0}
-ONBOARD='~/Cyberdog/scripts/hil/onboard.sh'
+ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
 
 on_board() { ssh -o BatchMode=yes -o ConnectTimeout=8 "$BOARD" "$@"; }
@@ -87,7 +87,7 @@ start_world() {
 }
 
 start_gaps() {
-    on_board "($BOARD_PY ~/Cyberdog/scripts/hil/dds_gaps.py 3600 $BOARD_IF > ~/hil_gaps.log 2>&1 < /dev/null &)"
+    on_board "($BOARD_PY ~/$REMOTE/scripts/hil/dds_gaps.py 3600 $BOARD_IF > ~/hil_gaps.log 2>&1 < /dev/null &)"
 }
 
 show_gaps() {
@@ -102,15 +102,14 @@ stop_all() {
 
 case "${1:-}" in
   sync)
-    # What is checked out is what goes: say which branches, and ask. A sync
+    # What is checked out is what goes: say which branch, and ask. A sync
     # from the wrong checkout put an old go2_board on the board once, and
-    # nothing said so until its walk fell.
-    for r in "$CYBERDOG" "$GO2_BOARD"; do
-        dirty=$(git -C "$r" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
-        printf '  %-10s %s @ %s%s\n' "$(basename "$r")" "$(git -C "$r" branch --show-current)" \
-            "$(git -C "$r" log -1 --format='%h %s' | cut -c1-60)" \
-            "$([ "$dirty" != 0 ] && echo "  (+$dirty uncommitted)")"
-    done
+    # nothing said so until its walk fell; the brain and the board are one
+    # repo now, so they can no longer be on different commits.
+    dirty=$(git -C "$CYBERDOG" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
+    printf '  %s %s @ %s%s\n' "$(basename "$CYBERDOG")" "$(git -C "$CYBERDOG" branch --show-current)" \
+        "$(git -C "$CYBERDOG" log -1 --format='%h %s' | cut -c1-60)" \
+        "$([ "$dirty" != 0 ] && echo "  (+$dirty uncommitted)")"
     if [ -t 0 ]; then
         read -r -p "copy these to $BOARD? [y/N] " yes
         [ "$yes" = y ] || { echo "not synced"; exit 1; }
@@ -118,10 +117,9 @@ case "${1:-}" in
         echo "not synced: no terminal to ask; SYNC_YES=1 to sync anyway"; exit 1
     fi
     rsync -a --exclude __pycache__ --exclude .pytest_cache --exclude '*.egg-info' --exclude .git \
-        --exclude models --exclude output --exclude vendor/VAMOS --exclude '*.docx' --exclude '*.pptx' \
-        --exclude vamos_train.tgz "$CYBERDOG/" "$BOARD:~/Cyberdog/" && echo "Cyberdog -> $BOARD:~/Cyberdog"
-    rsync -a --exclude __pycache__ --exclude .pytest_cache --exclude '*.egg-info' --exclude .git \
-        "$GO2_BOARD/" "$BOARD:~/go2_board/" && echo "go2_board -> $BOARD:~/go2_board" ;;
+        --exclude /models --exclude /output --exclude /datasets --exclude /vendor/VAMOS \
+        --exclude '*.docx' --exclude '*.pptx' --exclude /vamos_train.tgz \
+        "$CYBERDOG/" "$BOARD:~/$REMOTE/" && echo "$(basename "$CYBERDOG") -> $BOARD:~/$REMOTE" ;;
 
   clock)
     # A sudo password prompt needs a terminal: run this one yourself, not from a script.
@@ -133,7 +131,7 @@ case "${1:-}" in
     start_world
     on_board "$ONBOARD board" | tail -1
     start_gaps
-    on_board "cd ~/go2_board && $BOARD_PY -u scripts/brain_cli.py stand:4 walk:4:0.54,0,0.47 stand:2" \
+    on_board "cd ~/$REMOTE/go2_board && $BOARD_PY -u scripts/brain_cli.py stand:4 walk:4:0.54,0,0.47 stand:2" \
         > "$OUT/brain_cli.log" 2>&1
     grep "t=" "$OUT/brain_cli.log" | sed 's/  */ /g' | tail -n +8
     show_gaps

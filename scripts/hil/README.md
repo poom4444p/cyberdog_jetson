@@ -44,9 +44,9 @@ python3 -m venv ~/vamosenv && . ~/vamosenv/bin/activate
 pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
 pip install "numpy<2" transformers==5.17.0 peft==0.20.0 accelerate==1.15.0 fastapi uvicorn python-multipart pillow huggingface_hub
 
-# Mac: the repos (with go2_board's policies/, not in git), VAMOS's server and weights
+# Mac: this repo (go2_board/ and its go2_flat_v5 policy are in it), VAMOS's server and weights
 bash scripts/hil/run_hil.sh sync
-ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; pip install -e ~/go2_board[dev] -e ~/Cyberdog; mkdir -p ~/vamos ~/.cache/huggingface/hub'
+ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; pip install -e ~/cyberdog_jetson/go2_board[dev] -e ~/cyberdog_jetson; mkdir -p ~/vamos ~/.cache/huggingface/hub'
 rsync -a --exclude __pycache__ vendor/VAMOS/server jittarin@192.168.55.1:~/vamos/
 rsync -a ~/.cache/huggingface/hub/models--mateoguaman--vamos jittarin@192.168.55.1:~/.cache/huggingface/hub/
 ```
@@ -57,7 +57,7 @@ Then `run_hil.sh clock`, `walk` and `route`, as below. To switch the board off:
 ## A run
 
 ```
-bash scripts/hil/run_hil.sh sync                 # after changing Cyberdog or go2_board
+bash scripts/hil/run_hil.sh sync                 # after changing the brain or go2_board/
 bash scripts/hil/run_hil.sh clock                # after the board boots (asks for its sudo password)
 PY=/opt/anaconda3/envs/unitree_sim/bin/python bash scripts/hil/run_hil.sh walk
 PY=/opt/anaconda3/envs/unitree_sim/bin/python bash scripts/hil/run_hil.sh route "server room"
@@ -66,10 +66,11 @@ PY=/opt/anaconda3/envs/unitree_sim/bin/python bash scripts/hil/run_hil.sh route 
 `PY` is a Python with go2_world's packages (mujoco, unitree_sdk2py). Logs go to
 `output/hil/<time>-<walk|route>/`.
 
-`sync` copies the two repos **as checked out**: it prints each one's branch and
-commit and asks before copying (`SYNC_YES=1` when there is no terminal). Check
-the go2_board line: a sync from a checkout without the board fixes puts the old
-board on the J4012, and only a fall says so.
+`sync` copies this repo **as checked out** to `~/cyberdog_jetson` on the board:
+it prints the branch and commit and asks before copying (`SYNC_YES=1` when
+there is no terminal). The brain and go2_board used to be two repos synced
+separately, and a sync from a checkout without the board fixes once put an old
+board on the J4012, which only a fall showed; one repo means one commit for both.
 
 - **`walk`** (about a minute): the board stands, walks 4 s at 0.54 m/s and
   0.47 rad/s, and stands again, driven by go2_board's `brain_cli.py`, no brain.

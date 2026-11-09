@@ -6,7 +6,19 @@ a quadruped there — announcing turns, taking the lift (the stairs only if the
 person agrees), stepping around obstacles that are not on any map, and stopping
 to let people past.
 
-Runs entirely in a MuJoCo digital twin. **No robot hardware required.**
+Runs entirely in a MuJoCo digital twin, with no robot hardware required, or
+with everything the dog carries on a Jetson J4012 (hardware in the loop): the
+brain and VAMOS, and the board below them that runs the walking policy and
+safety in place of the Go2's own main board.
+
+| Folder | What | Runs on |
+|---|---|---|
+| `src/cyberdog/` | the brain: language, route, VAMOS steering, LiDAR, avoidance | Mac (twin) or J4012 |
+| `go2_board/` | the board: motor bus, safety, walking policy (`policies/go2_flat_v5`), Mid-360 guard ([README](go2_board/README.md)) | J4012 (or Mac against the sim) |
+| `scripts/hil/` | the J4012 rig: setup, sync and runs ([README](scripts/hil/README.md)) | Mac and J4012 |
+
+The world the J4012 walks in (physics, people, the lift, a simulated Mid-360)
+is go2_world, a separate repo that runs on the Mac.
 
 Built on [VAMOS](https://arxiv.org/abs/2510.20818) (the vision-language path
 planner), [RDog](https://dl.acm.org/doi/10.1145/3613904.3642227) (the semantic

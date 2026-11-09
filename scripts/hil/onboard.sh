@@ -15,7 +15,7 @@
 #   onboard.sh status               what is running, VAMOS, the clock
 #
 # Settings (environment, defaults for the rig as set up on the J4012):
-#   GO2_BOARD CYBERDOG GO2ENV       the two repos and their venv
+#   CYBERDOG GO2_BOARD GO2ENV       this repo, go2_board/ in it, and their venv
 #   VAMOS_DIR VAMOS_ENV VAMOS_PORT  the VAMOS server, its venv and port
 #   IFACE                           DDS interface to the world (USB-C: l4tbr0)
 #   POLICY                          walking policy, relative to GO2_BOARD
@@ -28,8 +28,8 @@
 #   TRACE=1                         brain prints its commands, ~5 lines/s
 set -u
 
-GO2_BOARD=${GO2_BOARD:-$HOME/go2_board}
-CYBERDOG=${CYBERDOG:-$HOME/Cyberdog}
+CYBERDOG=${CYBERDOG:-$HOME/cyberdog_jetson}
+GO2_BOARD=${GO2_BOARD:-$CYBERDOG/go2_board}
 GO2ENV=${GO2ENV:-$HOME/go2env}
 VAMOS_DIR=${VAMOS_DIR:-$HOME/vamos/server}
 VAMOS_ENV=${VAMOS_ENV:-$HOME/vamosenv}

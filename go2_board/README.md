@@ -83,7 +83,7 @@ interface.
 ## Walking policies
 
 `policies/<run>/` holds what go2_train exported (copy `logs/<run>/exported/`
-there; not in git). `board_main.py --policy` loads one; without it, WALK is
+there). Only `go2_flat_v5`, the one in use, is in git; others stay local. `board_main.py --policy` loads one; without it, WALK is
 refused. Before trusting a new one:
 
 ```

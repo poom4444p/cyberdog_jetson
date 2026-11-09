@@ -1,4 +1,6 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
-policies/
+# Exported walking policies: only the one in use is kept in git.
+policies/*
+!policies/go2_flat_v5/
