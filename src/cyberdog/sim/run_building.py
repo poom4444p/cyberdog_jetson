@@ -72,9 +72,25 @@ START_LOCATION = "main entrance"
 GO2_WORLD_ORIGIN = (21.0, 9.5, 0.0)
 START_FLOOR = 1
 FPS = 20                  # equals the control rate, so the video is real time
+SAY_AGAIN_S = 2.0         # seconds before the same step aside is said again
+GONE_S = 1.0              # seconds with nothing in sight before what was there is
+                          # gone. One empty scan is not it: each one re-announced
+                          # the detour, often on the other side -- 6 times "stepping
+                          # around it" left and right in the floor-3 server room,
+                          # round something standing by the destination (HIL 11-09).
 WAIT_S = 1.5              # held at the lift doors, and while auto-confirming
 ANNOUNCE_R = 2.5          # metres out that a checkpoint's line is spoken
 STEP_V = 0.4              # m/s in and out of the car -- slower than corridor pace
+# Out of the lift with the way on round a corner. The dog leaves the car facing
+# out, its user behind it in the car; turning the corner while walking, the turn
+# would swing them into the car, so it was eased into walking on: out of the
+# floor-3 lift for the server room, 1.1 m south of the doors, the dog went up to
+# 1.5 m west, turned 200-260 deg in all and said 4-6 things over 9-22 s before
+# it was through the door (HIL 11-09). A guide dog stops, says which way, and
+# turns slowly where there is room for the person to come round with it.
+EXIT_TURN_MIN = math.radians(35)  # less than this off straight out: the leg turns as it walks
+EXIT_TURN_W = 0.5         # rad/s: the turn, scripted, slow enough to follow on a handle
+EXIT_SHIFT = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)   # m from WAIT_XY towards the way on
 STAIR_V = 0.25            # m/s along a flight: a tread at a time, a third of corridor pace
 REPLAN_EVERY = 20         # ticks between VLM calls when --vamos is on
 REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacle
@@ -812,6 +828,7 @@ class Run:
         self.why_wait = collections.Counter()  # why a wait was not a going-round
         self.gave_up = None       # (layer, why) when follow() ends a leg short
         self.evading = 0.0             # sideways m/s while stepping aside, or 0
+        self.evade_said = (-INF, 0.0)  # (when, side) the last step aside was said
         self.evade = {"steps": 0, "ticks": 0}
         self.track_log = open(track_log, "w") if track_log else None
         self.no_plan = None                    # ...this tick's reason, for yield_to
@@ -1368,6 +1385,20 @@ class Run:
                 continue                          # through this one already
             return math.dist(xy, entry) < reach
         return False
+
+    @staticmethod
+    def door_through(gates, xy):
+        """The point FUNNEL_PAST beyond the far side of the doorway the funnel
+        is steering the dog into (see funnel), or None when it is not."""
+        for entry, exit_, (ux, uy) in gates:
+            s = (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy
+            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
+            if s > depth + FUNNEL_PAST:
+                continue
+            if s < -FUNNEL_D or abs((xy[0] - entry[0]) * -uy + (xy[1] - entry[1]) * ux) > FUNNEL_D:
+                return None
+            return (exit_[0] + ux * FUNNEL_PAST, exit_[1] + uy * FUNNEL_PAST)
+        return None
 
     @staticmethod
     def funnel(gates, xy, target):
@@ -2023,19 +2054,32 @@ class Run:
                 best, best_d = v, d
         if best and not self.evading:
             self.evade["steps"] += 1
-            self.say(f"Someone close. Stepping to your {'left' if best > 0 else 'right'}.")
+            # Said when the side is new, or it has been quiet a while: a step
+            # aside flickers off and on with the track, and each one was said
+            # -- "stepping to your left" 3 times and "right" 3 times inside 3 s
+            # in the floor-3 server room (HIL 11-09 15:27). A change of side is
+            # always said; the person is about to be led the other way.
+            now, side = self.robot.now(), math.copysign(1.0, best)
+            if side != self.evade_said[1] or now - self.evade_said[0] > SAY_AGAIN_S:
+                self.say(f"Someone close. Stepping to your {'left' if best > 0 else 'right'}.")
+                self.evade_said = (now, side)
         if best:
             self.evade["ticks"] += 1
         self.evading = best
         return best
 
     def follow(self, waypoints, floor, announcements=None, verbose=True,
-               goal_r=GOAL_R):
+               goal_r=GOAL_R, to_lift=False):
         """Walk one floor's leg. Same controller as run_demo, plus the frames.
 
         `goal_r` is how near the last waypoint counts as arrived -- tightened
         for the legs that end at the lift, where the remaining half metre is
-        walked scripted and has to start outside the car.
+        walked scripted and has to start outside the car. On those (`to_lift`)
+        the doorway counts too: a dog that comes at the waiting point on a
+        slant passes it more than goal_r off, and turning back for it the
+        turn-easing walked it on into the car instead -- 1 m in, sidestepping
+        a wall for 190 s until the leg timed out (HIL 11-09 14:49). In the
+        doorway it is still outside the car, facing it: lift_ride's own start.
         """
         self.floor = floor
         self.robot.set_height(levels.floor_z(floor))
@@ -2063,7 +2107,7 @@ class Run:
         # anything under --shadow.
         proposed, chosen, candidates, safety = None, None, [], 1.0
         hunting = halted = False
-        stalled = no_goal = 0
+        stalled = no_goal = unseen = 0
         lean = 0.0                # the side of a detour once it is committed
         held, against = None, 0   # its last aim, and ticks the other side was offered
 
@@ -2206,7 +2250,19 @@ class Run:
                 # free_destination decides -- it centres the pass when the gap
                 # has room and otherwise says straight on, as this did.
                 bar = max(need, perception.PASS_ROOM)
-                if (around and line_clear((x, y), corner, live.detected_at, bar)
+                # Nor through a doorway. Lined up for one on the route, with the
+                # way through it clear, what the LiDAR found is in the room
+                # beyond: there is nothing in this corridor to go round, and a
+                # detour would aim through the wall beside the door (the funnel
+                # gives way to an offset). Racks 3-5 m into the floor-3 server
+                # room had the dog told "stepping around it to your left",
+                # "...right", "no clear way past" in turn, 5 times in 6 s at its
+                # door (HIL 11-09 14:55). Past the doorway, free_destination
+                # judges the room as it would any other.
+                through = self.door_through(gates, (x, y))
+                if through is not None and line_clear((x, y), through, live.detected_at, bar):
+                    aim, offset = dest, 0.0
+                elif (around and line_clear((x, y), corner, live.detected_at, bar)
                         and line_clear(corner, dest, live.detected_at, bar, skip=0.0)):
                     aim, offset = dest, 0.0
                 else:
@@ -2260,7 +2316,8 @@ class Run:
                 self.autolabel.tick(n, (x, y, yaw), self.robot.camera_pose(), state,
                                     self.robot.get_image)
 
-            if math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < goal_r:
+            if (math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < goal_r
+                    or (to_lift and lift.in_doorway((x, y)))):
                 for line in (announcements[-1] if announcements else []):
                     self.say(line)
                 return True, n
@@ -2350,7 +2407,8 @@ class Run:
                 person = self.yield_to(tracks, (x, y), yaw, speed)
             # And so does the safety factor: a path the dog only just believes
             # it can walk is walked at half pace.
-            if not len(live.points):
+            unseen = 0 if len(live.points) else unseen + 1
+            if unseen == int(GONE_S * FPS):
                 # Nothing in sight any more: next time is a new obstacle and
                 # deserves to be announced again, and gets its own side.
                 hunting = halted = False
@@ -2606,7 +2664,7 @@ class Run:
         x, y, yaw = self.robot.get_pose()
         self.pivot(yaw, math.atan2(point[1] - y, point[0] - x), self.robot.z, seconds=1.2)
 
-    def lift_ride(self, from_floor, to_floor):
+    def lift_ride(self, from_floor, to_floor, onward=None):
         """Change floor the only way this robot will: in the lift.
 
         The leg in stops at lift.WAIT_XY, outside the open face (see
@@ -2662,11 +2720,49 @@ class Run:
         self.say(f"Floor {to_floor}. Doors opening.")
         for _ in range(int(WAIT_S * FPS)):
             self.frame()
-        # Back out west into the corridor before the velocity loop takes over,
-        # so the first thing it does is not a turn into the shaft wall. To the
-        # same waiting point the leg out of the lift now starts from.
-        self.glide(lift.WAIT_XY, math.pi, z1)
+        # Out west into the corridor before the velocity loop takes over, so
+        # the first thing it does is not a turn into the shaft wall -- and,
+        # when the way on is round a corner, turned to it here: see EXIT_TURN_MIN.
+        spot, heading = self.exit_spot(to_floor, onward)
+        self.glide(spot, math.pi, z1)
+        turn = wrap(heading - math.pi)
+        if turn:
+            self.say(f"Out of the lift. Turning {'left' if turn > 0 else 'right'}.")
+            self.pivot(math.pi, heading, z1, seconds=abs(turn) / EXIT_TURN_W)
+            self.glide(spot, heading, z1)          # a board lags the turn: let it finish
         self.in_lift = False
+
+    def exit_spot(self, floor, onward):
+        """(where to stand outside the car, the heading to turn to there).
+
+        The way on is the leg out's first target, through the funnel of a door
+        if it starts at one. Nearly straight on (EXIT_TURN_MIN): lift.WAIT_XY,
+        still facing out, and the leg turns as it walks. Round a corner: a spot
+        on the line from WAIT_XY towards it (EXIT_SHIFT), the nearest from
+        which the person on the handle keeps HANDLER_ROOM through the whole
+        turn, or else the roomiest."""
+        x0, y0 = lift.WAIT_XY
+        if not onward or len(onward) < 2:
+            return lift.WAIT_XY, math.pi
+        goal = tuple(onward[1])
+        tx, ty = self.funnel(self.router.gates(floor, onward), (x0, y0), goal)[0]
+        heading = math.atan2(ty - y0, tx - x0)
+        turn = wrap(heading - math.pi)
+        if abs(turn) < EXIT_TURN_MIN:
+            return lift.WAIT_XY, math.pi
+        live = self.clearance(floor)
+        ux, uy = math.cos(heading), math.sin(heading)
+        best = None
+        for d in EXIT_SHIFT:
+            x, y = x0 + d * ux, y0 + d * uy
+            if live(x, y) < ROBOT_R:
+                break
+            room = min(self.handler_room(live, x, y, math.pi + turn * k / 8) for k in range(9))
+            if room >= HANDLER_ROOM:
+                return (x, y), heading
+            if best is None or room > best[0]:
+                best = (room, (x, y))
+        return (best[1] if best else lift.WAIT_XY), heading
 
     @staticmethod
     def flights(from_floor, to_floor):
@@ -2960,14 +3056,15 @@ def main():
             print(f"  leg {k + 1}/{len(legs)}: floor {floor}, {len(waypoints)} checkpoints "
                   f"-> {'the ' + via if via else name}")
             ok, ticks = run.follow(waypoints, floor, announcements,
-                                   goal_r=LIFT_GOAL_R if via == "lift" else GOAL_R)
+                                   goal_r=LIFT_GOAL_R if via == "lift" else GOAL_R,
+                                   to_lift=via == "lift")
             if not ok:
                 print(f"  leg {k + 1} timed out after {ticks} ticks")
                 break
             if k in faces:
                 run.face(faces[k])
             if via == "lift":
-                run.lift_ride(floor, legs[k + 1][0])
+                run.lift_ride(floor, legs[k + 1][0], onward=legs[k + 1].points)
             elif via == "stairs":
                 run.stairs_ride(floor, legs[k + 1][0])
             else:
