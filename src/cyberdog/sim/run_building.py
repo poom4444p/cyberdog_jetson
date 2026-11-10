@@ -2226,6 +2226,12 @@ class Run:
                 self.track_log.write(json.dumps({
                     "t": round(self.robot.now(), 3), "floor": floor,
                     "tracks": [(t.x, t.y, t.vx, t.vy) for t in tracks if t.moving],
+                    # Every track, the slow ones too: (x, y, vx, vy, r, moving,
+                    # walked) -- whether a person slowed below MOVING_V is
+                    # still taken out of the planning field (live.exclude).
+                    "all": [(round(t.x, 3), round(t.y, 3), round(t.vx, 3), round(t.vy, 3),
+                             round(t.r, 3), t.moving, t.walked) for t in tracks],
+                    "pose": (round(x, 3), round(y, 3), round(yaw, 3)),
                     "walkers": self.crowds[floor].positions()}) + "\n")
             # Somebody standing still ahead who was seen walking is a person,
             # not a crate, whether or not the dog waited for them first: go
