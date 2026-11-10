@@ -391,7 +391,7 @@ def in_open_floor(a, b, live, need=STATIC_MIN, step=0.1, skip=SKIP):
 
 
 def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
-                     max_offset=MAX_OFFSET, step=OFFSET_STEP, prefer=0.0):
+                     max_offset=MAX_OFFSET, step=OFFSET_STEP, prefer=0.0, info=None):
     """The goal to aim at, keeping to the side the dog already committed to.
 
     Thin wrapper over `_free_destination`, which does the work. A preference
@@ -400,17 +400,21 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     because the side it had leant towards had nothing reachable left on it,
     while the other side did. So when the committed side comes back
     empty-handed, both are judged again.
+
+    `info`, a dict, is filled with what the answer was judged from when a
+    side was chosen: pinch, normal (unit, +1 side), along (unit, the route's
+    way), side (+1/-1), want (m across) and room (m, at the chosen crossing).
     """
     aim, off = _free_destination(destination, xy, live, probe, need,
-                                 max_offset, step, prefer)
+                                 max_offset, step, prefer, info)
     if aim is None and prefer:
         aim, off = _free_destination(destination, xy, live, probe, need,
-                                     max_offset, step, 0.0)
+                                     max_offset, step, 0.0, info)
     return aim, off
 
 
 def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
-                max_offset=MAX_OFFSET, step=OFFSET_STEP, prefer=0.0):
+                max_offset=MAX_OFFSET, step=OFFSET_STEP, prefer=0.0, info=None):
     """The goal to actually aim at: `destination`, or a point beside it with room.
 
     Returns (point, offset). Offset is signed and 0.0 when nothing moved, and
@@ -572,6 +576,10 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         side, want, best_room = roomiest((1.0, -1.0))
     if side is None:
         return nothing
+    if info is not None:
+        info.clear()
+        info.update(pinch=pinch, normal=(nx, ny), along=(rdx / rd, rdy / rd),
+                    side=side, want=want, room=best_room)
     # Centring a pass that was already allowed is only worth a swerve when the
     # middle really has more room than the line the dog is on.
     if straight and best_room < worst + CENTRE_GAIN:

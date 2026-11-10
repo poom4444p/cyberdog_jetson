@@ -255,6 +255,57 @@ def overtaking(xy, yaw, t, speed=0.0):
     return fwd < 0.0 or v_fwd > speed + PULL_DV
 
 
+def small_thing_beside(info, tracks, static_at):
+    """Something person-sized standing on the other side of the pinch from the
+    crossing free_destination chose, on floor the map calls open: the reason
+    the wider way is shut, maybe for only a moment. Moving or not -- a person
+    standing still is a cluster of returns like any other. None if not."""
+    (px, py), (nx, ny), (ux, uy) = info["pinch"], info["normal"], info["along"]
+    for t in tracks:
+        if not MIN_RADIUS <= t.r <= SMALL_R:
+            continue
+        lat = (t.x - px) * nx + (t.y - py) * ny
+        along = (t.x - px) * ux + (t.y - py) * uy
+        if (lat * info["side"] < 0 and 0.2 < abs(lat) < 1.5 and abs(along) < 1.2
+                and static_at(t.x, t.y) >= ROBOT_R):
+            return t
+    return None
+
+
+def axis_clear(info, detected_at, need=None):
+    """The line along a narrow gap, through the middle of the crossing, from
+    AXIS_BACK before it to AXIS_ON past it, keeps `need` (ROBOT_R + 5 cm)."""
+    (px, py), (nx, ny), (ux, uy) = info["pinch"], info["normal"], info["along"]
+    off = info["want"] * info["side"]
+    cx, cy = px + nx * off, py + ny * off
+    need = ROBOT_R + 0.05 if need is None else need
+    s = -AXIS_BACK
+    while s <= AXIS_ON + 1e-9:
+        if detected_at(cx + ux * s, cy + uy * s) < need:
+            return False
+        s += 0.1
+    return True
+
+
+def narrow_aim(info, xy, detected_at):
+    """Where to steer through a narrow gap: onto its axis ALIGN_PRE before the
+    entrance first, then straight along it. The axis runs along the route
+    through the middle of the crossing; the entrance is where, coming back
+    from the crossing towards the dog, the room opens up."""
+    (px, py), (nx, ny), (ux, uy) = info["pinch"], info["normal"], info["along"]
+    off = info["want"] * info["side"]
+    cx, cy = px + nx * off, py + ny * off
+    entrance = 0.0
+    while entrance < 3.0 and detected_at(cx - ux * entrance, cy - uy * entrance) < info["room"] + 0.2:
+        entrance += 0.1
+    lat = (xy[0] - cx) * nx + (xy[1] - cy) * ny
+    to_go = (cx - xy[0]) * ux + (cy - xy[1]) * uy
+    if abs(lat) > ALIGN_TOL and to_go > entrance + 0.1:
+        pre = entrance + ALIGN_PRE
+        return (cx - ux * pre, cy - uy * pre)
+    return (cx + ux * 1.0, cy + uy * 1.0)
+
+
 def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
     """The detour this tick, given the side already committed to.
 
@@ -274,6 +325,31 @@ def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
             return held[0], held[1], lean, held, against
     return aim, offset, side, (aim, offset), 0
 CLOUD_EVERY = 4           # --cloud-log keeps every 4th scan: 5 a second
+# A gap the board's guard will only let the dog through lined up: its front
+# corridor is BODY_HALF_W + MARGIN = 0.30 m either side of the heading, so a
+# 0.90 m gap (0.45 m from the middle to either side) passes straight and not
+# at an angle. With somebody standing in the trolley's 1.10 m north gap the dog
+# took the 0.90 m south one on a slant: 94-102 guard interventions, "too close
+# ... turning left" two or three times, 16-17 s past a trolley that takes 9.6
+# (HIL 11-10 12:48, 12:51), and pinned for 30 s on 11-09 13:28.
+NARROW_ROOM = 0.50        # m, middle of the crossing to the nearest thing: under
+                          # this a pass is narrow (south gap 0.45; north 0.50-0.60)
+NARROW_WAIT_S = 6.0       # s stood before a narrow way, while something person-
+                          # sized stands in the wider one: it may well move
+SMALL_R = 0.30            # m, the most a person standing still measures
+                          # (tracking.MIN_RADIUS is the least)
+ALIGN_TOL = 0.10          # m off a narrow gap's axis that still counts as lined up
+ALIGN_PRE = 0.5           # m before its entrance the dog lines up at. Further back
+                          # is nearer the dog when it starts close: from the main
+                          # entrance, 2.5 m from the trolley, 1.2 m made the cut
+                          # down to it -72 deg, not -33, and the route failed
+                          # (HIL 11-10 13:23; 0.5 m: 13:14, arrived)
+AXIS_BACK, AXIS_ON = 1.0, 1.5   # m of a narrow gap's axis, before and past the
+                          # crossing, that must be clear for it to count: room is
+                          # judged at the pinch only, and with somebody standing
+                          # 0.5 m further along the trolley's north gap a crossing
+                          # beside them read 0.46 m and the dog walked at them
+                          # (HIL 11-10 12:57, failed)
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
 
 # People, who are not crates. A crate is gone round; a person is waited for --
@@ -904,6 +980,9 @@ class Run:
         self.passing = None            # where the person being gone round stands
         self.passer_near = False       # someone passing in another lane within PASS_R
         self.overtakers_said = []      # tracks "Someone passing" has been said for
+        self.narrow_waited = 0         # ticks stood before a narrow way (NARROW_WAIT_S)
+        self.narrow_at = -INF          # when the dog last had a narrow way ahead
+        self.narrow_side = 0.0         # ...and which side it was on
         self.overtake_said_at = {}     # side -> when it was last said
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
@@ -2337,6 +2416,7 @@ class Run:
             # crate is five candidate paths into the crate -- measured, before
             # this existed. Move the goal and the model has something to solve.
             aim, offset, blocked = None, 0.0, False
+            finfo, narrow_hold, narrow_go = {}, False, False   # see NARROW_ROOM
             no_way = False            # the map has a route destination and no clear aim
             # Whenever the route has a destination -- not only when the camera
             # can see it. This used to read `if state["state"] == "TRACK"`, and
@@ -2410,10 +2490,10 @@ class Run:
                     aim, offset = dest, 0.0
                 else:
                     aim, offset = free_destination(dest, (x, y), live, probe=probe,
-                                                   prefer=lean, need=need)
+                                                   prefer=lean, need=need, info=finfo)
                     if aim is None and self.passing:
                         aim, offset = free_destination(dest, (x, y), live,
-                                                       probe=probe, prefer=lean)
+                                                       probe=probe, prefer=lean, info=finfo)
                 # Which way round it went, kept until the thing is out of
                 # sight: a detour that changes its mind halfway is a swerve,
                 # and the announcement below has already told the person which
@@ -2421,6 +2501,40 @@ class Run:
                 # SIDE_FLIP_TICKS.
                 aim, offset, lean, held, against = hold_side(lean, aim, offset,
                                                              held, against)
+                # A narrow way: wait a while if something person-sized is in
+                # the wider one, uncommitted, so it is taken if they move;
+                # then through, lined up. See NARROW_ROOM.
+                if self.robot.now() - self.narrow_at > 3.0:
+                    self.narrow_waited = 0            # a new narrow way gets its own wait
+                if (aim is not None and offset and finfo.get("room", INF) < NARROW_ROOM
+                        and math.copysign(1.0, offset) == finfo["side"]
+                        and not axis_clear(finfo, live.detected_at)):
+                    # Narrow, and shut further along: not a way. The other side,
+                    # if it has one; otherwise nothing, and the usual stopping.
+                    other = {}
+                    aim, offset = free_destination(dest, (x, y), live, probe=probe,
+                                                   prefer=-finfo["side"], need=need, info=other)
+                    if aim is not None and offset and other.get("side") != finfo["side"]:
+                        finfo = other
+                        lean, held, against = math.copysign(1.0, offset), (aim, offset), 0
+                    else:
+                        aim, offset, finfo = None, 0.0, {}
+                if (aim is not None and offset and finfo.get("room", INF) < NARROW_ROOM
+                        and math.copysign(1.0, offset) == finfo["side"]):
+                    self.narrow_at = self.robot.now()
+                    blocker = small_thing_beside(finfo, tracks, live.static_at)
+                    if blocker is not None and self.narrow_waited < NARROW_WAIT_S * FPS:
+                        if self.narrow_waited == 0:
+                            other = "left" if finfo["side"] < 0 else "right"
+                            self.say(f"Something standing in the wider way, on your {other}. "
+                                     "Waiting a moment.")
+                        self.narrow_waited += 1
+                        self.narrow_side = finfo["side"]
+                        narrow_hold = True
+                        lean, held, against = 0, None, 0
+                    else:
+                        aim = narrow_aim(finfo, (x, y), live.detected_at)
+                        narrow_go = True
                 # One tick with no clear goal is noise -- the scan is rebuilt
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
@@ -2567,7 +2681,12 @@ class Run:
                 hunting = halted = False
                 stalled = lean = against = 0
                 held = None
-            if offset and not hunting:
+            # Not the narrow side while waiting before it: a tick the thing in
+            # the wider way drops out of the scan said "stepping around it to
+            # your right", and the dog then went left when they moved (12:59).
+            waiting_narrow = (0 < self.narrow_waited < NARROW_WAIT_S * FPS
+                              and offset and math.copysign(1.0, offset) == self.narrow_side)
+            if offset and not hunting and not narrow_hold and not waiting_narrow:
                 # Said before the dog leans, not during: the person's arm is
                 # attached to the handle, and which way it is about to go is
                 # the one thing they cannot see coming. Positive offset is the
@@ -2662,6 +2781,10 @@ class Run:
                         self.say("They are not moving. Going slowly.")
                     speed *= CRAWL
 
+            if narrow_hold:
+                speed = 0.0                       # before a narrow way: see NARROW_WAIT_S
+            elif narrow_go:
+                speed = min(speed, PASS_V)        # through it, lined up
             turn_only = DOOR_ERR if at_door else TURN_ONLY
             cmd = (0.0 if abs(err) > turn_only else speed * math.cos(err), 0.0, K_W * err)
             if cmd[0] > 0.0 and self.nose_closing(live, (x, y, yaw), cmd):
