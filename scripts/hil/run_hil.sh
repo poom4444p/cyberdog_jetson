@@ -24,6 +24,7 @@
 #   PY           Python with go2_world's packages   (python)
 #   PEOPLE       people walking in the world        (4)
 #   WORLD_ARGS   more run_world arguments, e.g. --held-pd
+#   LIDAR_ARGS   more run_lidar arguments, e.g. --imu-noise (a real unit's IMU)
 #   VIEWER=1     the world with MuJoCo's viewer (mjpython next to PY), to watch or
 #                screen-record a run; it can hold the physics long enough to trip
 #                the board's stale-state guard, so headless is the default
@@ -31,6 +32,7 @@
 #                needs go2_world's [record] extra in PY's environment)
 #   TRACE=1      the brain prints its commands
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
+#   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
 #   ROUTE_S      a route is stopped after this long, in seconds  (560)
 set -u
 
@@ -45,10 +47,12 @@ REMOTE=${REMOTE:-cyberdog_jetson}
 PY=${PY:-python}
 PEOPLE=${PEOPLE:-4}
 WORLD_ARGS=${WORLD_ARGS:-}
+LIDAR_ARGS=${LIDAR_ARGS:-}
 VIEWER=${VIEWER:-0}
 RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
+CLOUD_LOG=${CLOUD_LOG:-0}
 ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
 
@@ -103,9 +107,9 @@ start_world() {
     grep -q "people walking" "$OUT/world.log" || { echo "world: did not start, see $OUT/world.log"; exit 1; }
     grep -E "^world:|^lift:" "$OUT/world.log"
     (cd "$GO2_WORLD" || exit 1; nohup "$PY" -u scripts/run_lidar.py --interface "$MAC_IF" \
-        --host "${BOARD#*@}" > "$OUT/lidar.log" 2>&1 < /dev/null &)
+        --host "${BOARD#*@}" $LIDAR_ARGS > "$OUT/lidar.log" 2>&1 < /dev/null &)
     sleep 13                                   # the emulator loads the scene, then streams
-    grep -m1 "^mid360:" "$OUT/lidar.log" || { echo "lidar: not streaming, see $OUT/lidar.log"; exit 1; }
+    grep "^mid360:" "$OUT/lidar.log" | head -2 | grep . || { echo "lidar: not streaming, see $OUT/lidar.log"; exit 1; }
 }
 
 start_gaps() {
@@ -168,7 +172,7 @@ case "${1:-}" in
     on_board "$ONBOARD vamos"
     on_board "$ONBOARD board" | tail -1
     start_gaps
-    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
+    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
     grep -E "ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|help|planner" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
@@ -176,6 +180,10 @@ case "${1:-}" in
     if [ "$TRACK_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/tracks.jsonl" "$OUT/tracks.jsonl" \
             && echo "tracks: $OUT/tracks.jsonl" || echo "tracks: not copied"
+    fi
+    if [ "$CLOUD_LOG" = 1 ]; then
+        scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/clouds.npz" "$OUT/clouds.npz" \
+            && echo "clouds: $OUT/clouds.npz" || echo "clouds: not copied"
     fi
     grep -q "^ARRIVED" "$OUT/brain.log" ;;
 

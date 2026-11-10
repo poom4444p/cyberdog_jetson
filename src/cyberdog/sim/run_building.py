@@ -254,6 +254,7 @@ def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
         if against < ticks and held is not None:
             return held[0], held[1], lean, held, against
     return aim, offset, side, (aim, offset), 0
+CLOUD_EVERY = 4           # --cloud-log keeps every 4th scan: 5 a second
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
 
 # People, who are not crates. A crate is gone round; a person is waited for --
@@ -773,7 +774,7 @@ class Run:
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
                  vamos_samples=5,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
-                 track_log=None, robot=None):
+                 track_log=None, robot=None, cloud_log=None):
         self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                           start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -897,6 +898,9 @@ class Run:
         self.evade_said = (-INF, 0.0)  # (when, side) the last step aside was said
         self.evade = {"steps": 0, "ticks": 0}
         self.track_log = open(track_log, "w") if track_log else None
+        # --cloud-log: every CLOUD_EVERY-th scan as the brain got it (map
+        # frame), with the pose it was placed by; saved as one .npz on close.
+        self.cloud_log, self.clouds = cloud_log, []
         self.no_plan = None                    # ...this tick's reason, for yield_to
         self.place_crowd()
 
@@ -1039,6 +1043,12 @@ class Run:
             self.writer.close()
         if self.track_log is not None:
             self.track_log.close()
+        if self.cloud_log and self.clouds:
+            meta = np.array([c[0] for c in self.clouds])
+            pts = [c[1] for c in self.clouds]
+            np.savez_compressed(self.cloud_log, meta=meta,
+                                offsets=np.cumsum([0] + [len(p) for p in pts]),
+                                points=np.concatenate(pts).astype(np.float32))
 
     # -- driving --------------------------------------------------------
     def clearance(self, floor):
@@ -2209,6 +2219,10 @@ class Run:
             self.step_crowd()
             live = self.clearance(floor)
             scan = self.robot.get_scan()
+            if self.cloud_log and n % CLOUD_EVERY == 0:
+                # meta: t, floor, x, y, yaw, floor z -- see Run.close
+                self.clouds.append(((self.robot.now(), floor, x, y, yaw, self.robot.z),
+                                    np.asarray(scan, np.float32).reshape(-1, 3)))
             live.update(scan, self.robot.z, (x, y), origin=(x, y, self.robot.z + MOUNT_H))
             if self.elev is not None:
                 self.elev.add(scan, (x, y), self.robot.z)
@@ -3002,6 +3016,9 @@ def main():
                          "go round them on a path planned where they will be, waiting "
                          "only when no path is safe; planning/ce_rrt.py) or map (wait "
                          "for them)")
+    ap.add_argument("--cloud-log", default=None, metavar="PATH",
+                    help="save every %d-th scan (map frame) and the dog's pose to "
+                         "an .npz when the run ends" % CLOUD_EVERY)
     ap.add_argument("--track-log", default=None, metavar="PATH",
                     help="write the tracker's moving tracks and every walker's true "
                          "position, each tick, as JSON lines "
@@ -3093,7 +3110,7 @@ def main():
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
               crowd=args.pedestrians, seed=args.seed, aware=args.crowd == "aware",
-              planner=args.planner, track_log=args.track_log,
+              planner=args.planner, track_log=args.track_log, cloud_log=args.cloud_log,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               vamos_samples=args.vamos_samples,

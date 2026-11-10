@@ -8,10 +8,19 @@ The receiver runs in its own thread: a dense frame is 210 packets, and parsing
 them must not cost the motor loop a tick. The loop only ever reads the newest
 Clearance, which is replaced whole, never edited, so it needs no lock.
 
-Points are levelled with the Mid-360's own IMU (gravity, low-passed), so a
-dog pitching as it walks does not see the floor rise into an obstacle, and
-are moved to the trunk: x forward, y left, z up, origin on the floor under
-the trunk origin. That is also the frame the brain gets them in.
+Points are levelled with the Mid-360's own IMU, so a dog pitching as it walks
+does not see the floor rise into an obstacle, and are moved to the trunk: x
+forward, y left, z up, origin on the floor under the trunk origin. That is
+also the frame the brain gets them in.
+
+The level is tracked with the gyro and only corrected by gravity, slowly
+(Tilt, TILT_TAU_S), and each point is levelled with the tilt at its own
+timestamp (the IMU and the points share the sensor's clock). Gravity alone,
+low-passed over 0.25 s, was both too slow for a trot's rocking and pulled
+about by the body's accelerations: on HIL 11-10 the floor 1-8 m ahead was
+tilted more than 2 deg in 39 % of frames (p5 -4.5, p95 +3.3 deg), its far
+end rose above the brain's 0.08 m obstacle height, and the brain saw a
+person-wide "something" across the corridor about 3 m ahead.
 
 Clearance is the free distance from the body's edge to the nearest obstacle
 in front, behind, left and right: points 0.10 to 1.0 m above the floor, in a
@@ -58,7 +67,20 @@ STOP_M, SLOW_M = 0.30, 1.00  # free distance: no motion that way / full speed
 # nothing lower than the sensor is ever seen there, so backing up is slow.
 REVERSE_MAX = 0.2           # m/s
 STALE_S = 0.30               # three frames missed: treat as blind
-G_ALPHA = 0.02               # gravity low-pass a 200 Hz sample: ~0.25 s
+IMU_DT = 1.0 / 200            # s, the Mid-360's IMU period: used when a sample has no usable time
+TILT_TAU_S = 1.0             # s over which gravity corrects the gyro's level: longer
+                             # lets less of the trot's acceleration in
+BIAS_TAU_S = 2.0             # s over which the gyro's bias is learnt from what is
+                             # left (the integral term), so a long TILT_TAU_S does not
+                             # let a biased gyro walk the level off
+ACC_TRUST = 0.2              # g away from 1 g at which the accelerometer is not
+                             # trusted at all (linear in between): it is the body
+                             # accelerating, not gravity
+TILT_SETTLE_S = 1.0          # s after the first sample over which gravity corrects
+TILT_SETTLE_TAU_S = 0.1      # ...this fast: the first sample, taken as up, can be
+                             # a body accelerating (a dog started while walking)
+TILT_KEEP_S = 0.5            # s of tilt history kept to level a frame's points with
+TILT_SLICES = 10             # a frame is levelled in this many time slices
 
 BRAIN_CLOUD_PORT = 9872
 HOST = "127.0.0.1"
@@ -80,6 +102,73 @@ def levelling(g):
         return np.diag([1.0, -1.0, -1.0])
     k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     return np.eye(3) + k + k @ k / (1.0 + c)
+
+
+def rotate(v, axis_angle):
+    """v turned by the rotation vector axis_angle (Rodrigues)."""
+    a = float(np.linalg.norm(axis_angle))
+    if a < 1e-12:
+        return v
+    k = axis_angle / a
+    c, s = math.cos(a), math.sin(a)
+    return v * c + np.cross(k, v) * s + k * float(k @ v) * (1.0 - c)
+
+
+class Tilt:
+    """Which way is up, in the sensor frame, from the Mid-360's IMU.
+
+    The gyro carries it from sample to sample (a world-fixed direction seen
+    from a sensor turning at w moves at -w x up); gravity pulls it back over
+    TILT_TAU_S, less the further the accelerometer reads from 1 g. Kept for
+    TILT_KEEP_S so a frame's points can each be levelled with the tilt of
+    the moment they were measured."""
+
+    def __init__(self, up):
+        self.up = np.asarray(up, float) / np.linalg.norm(up)
+        self.t = None                    # ns of the last sample
+        self.seen = False                # a sample has set it from gravity
+        self.history = []                # [(ns, up)]
+        self.age = 0.0                   # s of samples since the first
+        self.bias = np.zeros(3)          # rad/s, the gyro's, as learnt
+
+    def add(self, s):
+        g = float(np.linalg.norm(s.acc))
+        if g < 1e-6:
+            return
+        if not self.seen:                # the first word from gravity: believe it
+            self.up, self.seen = s.acc / g, True
+        else:
+            dt = (s.t - self.t) * 1e-9 if self.t is not None else 0.0
+            if not 0.0 < dt < 0.1:       # no usable time (or a gap): one IMU period
+                dt = IMU_DT
+            self.age += dt
+            trust = max(0.0, 1.0 - abs(g / 9.81 - 1.0) / ACC_TRUST)
+            tau = TILT_SETTLE_TAU_S if self.age < TILT_SETTLE_S else TILT_TAU_S
+            # Mahony: e turns the level towards gravity (proportional), and
+            # what it keeps having to turn is the gyro's bias (integral).
+            e = np.cross(self.up, s.acc / g) * trust
+            w = np.asarray(s.gyro, float) - self.bias - e / tau
+            up = rotate(self.up, -w * dt)
+            if self.age >= TILT_SETTLE_S:
+                self.bias += e * dt / (tau * BIAS_TAU_S)
+            self.up = up / np.linalg.norm(up)
+        self.t = s.t
+        self.history.append((s.t, self.up))
+        cut = s.t - int(TILT_KEEP_S * 1e9)
+        while len(self.history) > 2 and self.history[0][0] < cut:
+            self.history.pop(0)
+
+    def at(self, t):
+        """Up at time t (ns): the nearest kept sample, or the newest."""
+        if not self.history:
+            return self.up
+        ts = [h[0] for h in self.history]
+        k = int(np.searchsorted(ts, t, side="right"))   # ts[k-1] <= t < ts[k]
+        if k <= 0:
+            return self.history[0][1]
+        if k >= len(ts):
+            return self.history[-1][1]
+        return self.history[k][1] if ts[k] - t < t - ts[k - 1] else self.history[k - 1][1]
 
 
 class Clearance:
@@ -230,7 +319,7 @@ class Lidar:
         self.clock = clock
         self.brain = brain
         self.R_ts = mount_rotation(mount_pitch)
-        self.up = self.R_ts.T @ np.array([0.0, 0.0, 1.0])   # sensor frame, until the IMU says
+        self.tilt = Tilt(self.R_ts.T @ np.array([0.0, 0.0, 1.0]))  # the mount's, until the IMU says
         self.height = SENSOR_HEIGHT                          # sensor above the floor, per frame
         self.latest = None                                   # Clearance
         self.seq = 0
@@ -241,10 +330,30 @@ class Lidar:
     def clearance(self):
         return self.latest
 
-    def level(self, xyz_sensor):
-        """Sensor-frame points -> levelled trunk frame, floor at z = 0."""
-        R = levelling(self.up)
-        pts = np.einsum("ij,kj->ik", xyz_sensor, R)   # not @: Accelerate warns spuriously on macOS
+    @property
+    def up(self):
+        return self.tilt.up
+
+    def level(self, xyz_sensor, t=None):
+        """Sensor-frame points -> levelled trunk frame, floor at z = 0.
+
+        `t`: each point's time (ns). Levelled in TILT_SLICES slices of the
+        frame's time span, each with the tilt of its middle; without `t`,
+        all with the newest tilt."""
+        xyz_sensor = np.asarray(xyz_sensor, float)
+        if t is None or len(t) == 0 or not self.tilt.history or t.max() == t.min():
+            when = None if t is None or len(t) == 0 else int(np.median(t))
+            R = levelling(self.tilt.up if when is None else self.tilt.at(when))
+            pts = np.einsum("ij,kj->ik", xyz_sensor, R)   # not @: Accelerate warns spuriously on macOS
+        else:
+            pts = np.empty_like(xyz_sensor)
+            edges = np.linspace(t.min(), t.max(), TILT_SLICES + 1)
+            k = np.clip(np.searchsorted(edges, t, side="right") - 1, 0, TILT_SLICES - 1)
+            for j in range(TILT_SLICES):
+                m = k == j
+                if m.any():
+                    R = levelling(self.tilt.at(int((edges[j] + edges[j + 1]) / 2)))
+                    pts[m] = np.einsum("ij,kj->ik", xyz_sensor[m], R)
         self.height = floor_height(pts, self.height)
         pts[:, 0] += MOUNT_X
         pts[:, 2] += self.height
@@ -252,9 +361,9 @@ class Lidar:
 
     def process(self, frames, samples):
         for s in samples:                # specific force at rest points up
-            self.up = (1 - G_ALPHA) * self.up + G_ALPHA * s.acc / np.linalg.norm(s.acc)
+            self.tilt.add(s)
         for f in frames:
-            pts = self.level(f.xyz)
+            pts = self.level(f.xyz, getattr(f, "t", None))
             now = self.clock()
             self.latest = clearance(pts, now)
             if self.sock is not None:

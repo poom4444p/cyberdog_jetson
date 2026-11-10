@@ -234,3 +234,86 @@ def test_floor_height_without_a_usable_floor_keeps_the_last_quietly():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert floor_height(pts, 0.42) == 0.42
+
+
+# -- levelling a trotting dog ---------------------------------------------------
+
+def rocking(t, amp=3.0, hz=2.0):
+    """Trunk pitch (deg, nose-down) and its rate (rad/s) at t seconds."""
+    w = 2 * math.pi * hz
+    return amp * math.sin(w * t), math.radians(amp) * w * math.cos(w * t)
+
+
+def trot_imu(t0, t1, bump=2.0, surge=1.0, gyro_bias=0.0):
+    """Mid-360 IMU samples at 200 Hz over [t0, t1) s of a rocking trunk: the gyro
+    (about y, which the 20 deg mount shares with the trunk) and the specific
+    force, with the body's own vertical bounce (`bump`) and forward surge
+    (`surge`), m/s^2, on it."""
+    out = []
+    for k in range(int(round((t1 - t0) * 200))):
+        t = t0 + k / 200
+        pitch, rate = rocking(t)
+        R_ws = L.mount_rotation(pitch) @ R_TS
+        acc = R_ws.T @ [surge * math.sin(2 * math.pi * 2.0 * t + 1.0), 0.0,
+                        9.81 + bump * math.sin(2 * math.pi * 4.0 * t)]
+        out.append(ImuSample(int(t * 1e9), np.array([0.0, rate + gyro_bias, 0.0]), acc))
+    return out
+
+
+def trot_frame(t0, slices=10):
+    """One 100 ms frame of floor and wall, each slice seen at that moment's pitch."""
+    pts = floor_and_wall(5.0)
+    groups = np.array_split(np.arange(len(pts)), slices)
+    xyz, ts = [], []
+    for j, g in enumerate(groups):
+        t = t0 + (j + 0.5) * 0.1 / slices
+        xyz.append(to_sensor(pts[g], rocking(t)[0]))
+        ts.append(np.full(len(g), int(t * 1e9), np.int64))
+    xyz, ts = np.vstack(xyz), np.concatenate(ts)
+    return Frame(xyz, np.zeros(len(xyz), np.uint8), np.zeros(len(xyz), np.uint8), ts,
+                 int(t0 * 1e9), 0, 1, 0)
+
+
+def worst_floor_tilt(li, t_end=3.0, t_from=1.0, **imu):
+    """Run 1 s to settle, then frames to t_end; the worst floor tilt seen from
+    t_from on, deg."""
+    li.process([], trot_imu(0.0, 1.0, **imu))
+    worst, t = 0.0, 1.0
+    while t < t_end:
+        li.process([], trot_imu(t, t + 0.1, **imu))
+        f = trot_frame(t)
+        pts = li.level(f.xyz, f.t)
+        floor = pts[(pts[:, 0] > 1.0) & (pts[:, 0] < 4.5) & (pts[:, 2] < 0.3)]
+        slope = np.polyfit(floor[:, 0], floor[:, 2], 1)[0]
+        if t >= t_from:
+            worst = max(worst, abs(math.degrees(math.atan(slope))))
+        t += 0.1
+    return worst
+
+
+def test_a_trotting_dog_sees_a_level_floor():
+    # 3 deg of rocking at 2 Hz, 2 m/s^2 of bounce, 1 m/s^2 of surge
+    assert worst_floor_tilt(Lidar(clock=Clock(), brain=None), t_end=8.0, t_from=4.0) < 0.4
+
+
+def test_gyro_bias_is_learnt():
+    # 1 deg/s of bias, more than a Mid-360's: learnt, and the floor stays level
+    li = Lidar(clock=Clock(), brain=None)
+    assert worst_floor_tilt(li, t_end=30.0, t_from=15.0, gyro_bias=math.radians(1.0)) < 0.4
+    assert math.degrees(li.tilt.bias[1]) == pytest.approx(1.0, abs=0.1)
+
+
+def test_gravity_alone_could_not_follow_the_trot():
+    # the old way, for comparison: up from low-passed gravity, no gyro
+    li = Lidar(clock=Clock(), brain=None)
+    li.process([], trot_imu(0.0, 1.0))
+    up, worst, t = li.up, 0.0, 1.0
+    while t < 3.0:
+        for s in trot_imu(t, t + 0.1):
+            up = 0.98 * up + 0.02 * s.acc / np.linalg.norm(s.acc)
+        pts = np.einsum("ij,kj->ik", trot_frame(t).xyz, levelling(up))
+        floor = pts[(pts[:, 0] > 1.0) & (pts[:, 0] < 4.5) & (pts[:, 2] < -0.2)]
+        slope = np.polyfit(floor[:, 0], floor[:, 2], 1)[0]
+        worst = max(worst, abs(math.degrees(math.atan(slope))))
+        t += 0.1
+    assert worst > 1.5
