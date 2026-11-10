@@ -28,6 +28,8 @@
 #   TRACE=1                         brain prints its commands, ~5 lines/s
 #   TRACK_LOG=1                     brain writes every track, every tick, to
 #                                   $CYBERDOG/output/tracks.jsonl (--track-log)
+#   CLOUD_LOG=1                     brain saves its scans to
+#                                   $CYBERDOG/output/clouds.npz (--cloud-log)
 set -u
 
 CYBERDOG=${CYBERDOG:-$HOME/cyberdog_jetson}
@@ -97,6 +99,10 @@ case "${1:-}" in
     if [ "${TRACK_LOG:-0}" = 1 ]; then
         mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/tracks.jsonl"
         tracklog=(--track-log "$CYBERDOG/output/tracks.jsonl")
+    fi
+    if [ "${CLOUD_LOG:-0}" = 1 ]; then
+        mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/clouds.npz"
+        tracklog+=(--cloud-log "$CYBERDOG/output/clouds.npz")
     fi
     # MUJOCO_GL=egl: the camera view VAMOS is shown is rendered with no display
     # (23 ms a frame); on the dog it comes from a USB camera.

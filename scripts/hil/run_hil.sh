@@ -31,6 +31,7 @@
 #                needs go2_world's [record] extra in PY's environment)
 #   TRACE=1      the brain prints its commands
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
+#   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
 #   ROUTE_S      a route is stopped after this long, in seconds  (560)
 set -u
 
@@ -49,6 +50,7 @@ VIEWER=${VIEWER:-0}
 RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
+CLOUD_LOG=${CLOUD_LOG:-0}
 ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
 
@@ -168,7 +170,7 @@ case "${1:-}" in
     on_board "$ONBOARD vamos"
     on_board "$ONBOARD board" | tail -1
     start_gaps
-    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
+    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
     grep -E "ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|help|planner" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
@@ -176,6 +178,10 @@ case "${1:-}" in
     if [ "$TRACK_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/tracks.jsonl" "$OUT/tracks.jsonl" \
             && echo "tracks: $OUT/tracks.jsonl" || echo "tracks: not copied"
+    fi
+    if [ "$CLOUD_LOG" = 1 ]; then
+        scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/clouds.npz" "$OUT/clouds.npz" \
+            && echo "clouds: $OUT/clouds.npz" || echo "clouds: not copied"
     fi
     grep -q "^ARRIVED" "$OUT/brain.log" ;;
 
