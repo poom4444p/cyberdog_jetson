@@ -236,6 +236,25 @@ def passes_by(xy, yaw, t, horizon=None):
     return lat * end > 0 and min(abs(lat), abs(end)) >= PASS_LAT
 
 
+def overtaking(xy, yaw, t, speed=0.0):
+    """Is track `t` somebody walking the dog's way who is coming up behind it
+    -- behind its centre -- or is level with or ahead of it and pulling away
+    (faster than it by PULL_DV), and not cutting across? Nothing the dog does
+    helps them by stopping: they pass it, or are gone. Waiting for one stood
+    the dog still, stepping left and right, for 5 s with 9 announcements (HIL
+    11-10 11:24); and somebody 1 m ahead walking off at 1.3 m/s was "Someone
+    ahead. Waiting." (11:45), closer than MISS_R and leaving."""
+    if not (t.moving or t.walked):
+        return False
+    c, s = math.cos(yaw), math.sin(yaw)
+    fwd = (t.x - xy[0]) * c + (t.y - xy[1]) * s
+    v_fwd = t.vx * c + t.vy * s
+    v_lat = -t.vx * s + t.vy * c
+    if v_fwd < CROSS_V or abs(v_lat) > max(PASS_LAT_V, 0.5 * v_fwd):
+        return False
+    return fwd < 0.0 or v_fwd > speed + PULL_DV
+
+
 def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
     """The detour this tick, given the side already committed to.
 
@@ -283,6 +302,12 @@ PASS_LAT = 0.75           # m, centre to centre across the dog's heading: someon
                           # still with nothing ahead (HIL 11-09 15:24, 15:29).
                           # A person's 0.22 m, the dog's 0.2 m and 0.3 m between.
 PASS_LAT_V = 0.25         # m/s across: slower than this is walking along, not over
+OVERTAKE_AHEAD = 0.5      # m in front of the dog's centre someone passing it is
+                          # still beside it: "Someone passing" is said up to here
+OVERTAKE_SAY_S = 8.0      # s before "Someone passing" is said again on the same side:
+                          # a person's track breaks and comes back as a new one,
+                          # and once a track was 6 times in 8 s (HIL 11-10 12:25)
+PULL_DV = 0.1             # m/s faster than the dog: somebody ahead is pulling away
 PASS_HORIZON = 2.5        # s of their walk it has to hold for (tracking.HORIZON)
 LANE_LOOK = 2.0           # m along the route ahead of the dog's foot on it that
                           # the map steers at, not the next waypoint: that can be
@@ -878,6 +903,8 @@ class Run:
         self.waiting_for = None        # the track being yielded to, if any
         self.passing = None            # where the person being gone round stands
         self.passer_near = False       # someone passing in another lane within PASS_R
+        self.overtakers_said = []      # tracks "Someone passing" has been said for
+        self.overtake_said_at = {}     # side -> when it was last said
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
@@ -1940,7 +1967,7 @@ class Run:
             walked += d
         return pts[-1]
 
-    def go_round(self, live, tracks, pose, route, gates, n, speed):
+    def go_round(self, live, tracks, pose, route, gates, n, speed, ignore=()):
         """(where to steer to go round people, or None to carry on as before;
         somebody to stand still for). --planner cerrt.
 
@@ -1958,8 +1985,11 @@ class Run:
         going closer."""
         x, y, yaw = pose
         vel = (speed * math.cos(yaw), speed * math.sin(yaw))
-        held = self.waiting_for if self.waiting_for in tracks else None
-        threat = conflict((x, y), vel, tracks, radius=MISS_R) or held
+        # `ignore`: people overtaking the dog. Not a reason to go round
+        # anybody, but still people every plan has to keep clear of.
+        others = [t for t in tracks if t not in ignore]
+        held = self.waiting_for if self.waiting_for in others else None
+        threat = conflict((x, y), vel, others, radius=MISS_R) or held
         close = None
         if threat is None:
             # conflict() stops asking inside NEAR_R, and yield_to with it. A
@@ -1967,7 +1997,7 @@ class Run:
             # seed 8 stood a metre from somebody who then walked across its
             # nose: nothing asked, and it walked on into them (0.50 m). Here
             # anybody that close whose way meets the dog's is asked about.
-            for t in tracks:
+            for t in others:
                 if (t.moving and math.dist((x, y), (t.x, t.y)) < NEAR_R
                         and closest_approach((x, y), vel, (t.x, t.y), (t.vx, t.vy))
                         - min(t.r, 0.4) < MISS_R):
@@ -2060,6 +2090,29 @@ class Run:
             return None, close
         self.plans["ticks"] += 1
         return path_target(rest, (x, y)), None
+
+    def mention_overtakers(self, behind, xy, yaw):
+        """Tell the person on the handle that somebody is passing close, and on
+        which side -- they will feel them go by and cannot see them -- once a
+        person: an overtaker a little faster than the dog is beside it for
+        6-10 s, and a repeat every few seconds was said 4-5 times a route."""
+        self.overtakers_said = [t for t in self.overtakers_said if t in behind]
+        c, s = math.cos(yaw), math.sin(yaw)
+        for t in behind:
+            if t in self.overtakers_said:
+                continue
+            fwd = (t.x - xy[0]) * c + (t.y - xy[1]) * s
+            lat = -(t.x - xy[0]) * s + (t.y - xy[1]) * c
+            if not -HANDLER_BEHIND - 1.0 < fwd < OVERTAKE_AHEAD or abs(lat) > PASS_R:
+                continue                  # not beside either of them
+            if abs(lat) < SIDE_DEAD:
+                continue                  # straight behind: which side is not known yet
+            self.overtakers_said.append(t)
+            side, now = (1 if lat > 0 else -1), self.robot.now()
+            if now - self.overtake_said_at.get(side, -INF) > OVERTAKE_SAY_S:
+                self.say(f"Someone passing on your {'left' if side > 0 else 'right'}.")
+                self.overtake_said_at[side] = now
+            return
 
     def step_aside(self, live, tracks, pose):
         """Sideways m/s for a waiting dog to get out of somebody's way, or 0.
@@ -2479,8 +2532,13 @@ class Run:
             # them can see that the thing ahead is walking. free_destination would
             # happily route the dog through the gap behind somebody, and the
             # gap moves.
+            # Somebody coming up behind, the same way, is let past: not
+            # waited for, not gone round, not stepped away from by stopping.
+            # They stay in every prediction (plans, step aside, the handle).
+            behind = [t for t in tracks if overtaking((x, y), yaw, t, speed)]
+            self.mention_overtakers(behind, (x, y), yaw)
             round_to, close = (self.go_round(live, tracks, (x, y, yaw), waypoints[i:],
-                                             gates, n, speed)
+                                             gates, n, speed, ignore=behind)
                                if self.planner == "cerrt" else (None, None))
             if round_to is None and close is not None:
                 # Somebody within NEAR_R walking into the dog's way, and no
@@ -2496,7 +2554,8 @@ class Run:
                 speed = min(speed, self.plan.v)
                 person = None
             else:
-                person = self.yield_to(tracks, (x, y), yaw, speed)
+                person = self.yield_to([t for t in tracks if t not in behind],
+                                       (x, y), yaw, speed)
                 if person is None and self.passer_near:
                     speed = min(speed, PASS_V)           # walking past someone: see PASS_LAT
             # And so does the safety factor: a path the dog only just believes
