@@ -188,6 +188,54 @@ BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believin
 SIDE_FLIP_TICKS = BLOCKED_TICKS
 
 
+def lane_point(xy, waypoints, i, look=None):
+    """`look` metres along the route from the dog's foot on its current segment
+    (waypoints[i-1] -> waypoints[i]), or the route's end."""
+    a = waypoints[i - 1] if i > 0 else xy
+    b = waypoints[i]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    seg = dx * dx + dy * dy
+    t = 0.0 if seg < 1e-12 else min(max(((xy[0] - a[0]) * dx + (xy[1] - a[1]) * dy) / seg, 0.0), 1.0)
+    p = (a[0] + t * dx, a[1] + t * dy)
+    left = LANE_LOOK if look is None else look
+    for q in waypoints[i:]:
+        d = math.dist(p, q)
+        if d >= left:
+            return (p[0] + (q[0] - p[0]) * left / d, p[1] + (q[1] - p[1]) * left / d)
+        left -= d
+        p = (q[0], q[1])
+    return tuple(waypoints[-1])
+
+
+def in_lane(pt, a, b, tol=None):
+    """`pt` moved across the line a -> b to within `tol` of it."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = math.hypot(dx, dy)
+    if n < 1e-9:
+        return pt
+    nx, ny = -dy / n, dx / n                     # left-hand normal
+    lat = (pt[0] - a[0]) * nx + (pt[1] - a[1]) * ny
+    tol = LANE_TOL if tol is None else tol
+    if abs(lat) <= tol:
+        return pt
+    shift = math.copysign(tol, lat) - lat
+    return (pt[0] + nx * shift, pt[1] + ny * shift)
+
+
+def passes_by(xy, yaw, t, horizon=None):
+    """Is track `t` walking along past the dog, PASS_LAT to one side of it the
+    whole way? Its sideways offset from the dog's heading, now and `horizon`
+    on, on the same side and at least PASS_LAT; moving across slower than
+    PASS_LAT_V."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    lat = -(t.x - xy[0]) * s + (t.y - xy[1]) * c
+    lat_v = -t.vx * s + t.vy * c
+    if abs(lat_v) > PASS_LAT_V:
+        return False
+    end = lat + lat_v * (PASS_HORIZON if horizon is None else horizon)
+    return lat * end > 0 and min(abs(lat), abs(end)) >= PASS_LAT
+
+
 def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
     """The detour this tick, given the side already committed to.
 
@@ -225,6 +273,23 @@ PASS_NEED = 0.60          # going round someone who has stopped: room kept from
                           # give each other in passing. A crate's 0.35 took
                           # the dog past a standing person at 0.50 m, at full
                           # speed, 9 cm from their shoulder.
+PASS_LAT = 0.75           # m, centre to centre across the dog's heading: someone
+                          # walking along the corridor who stays this far to the
+                          # side, all the way past, is passed at PASS_V, not
+                          # waited for. MISS_R (0.95 m surface to centre) made
+                          # every passer-by in the next lane of a 2.8 m corridor
+                          # a conflict: 41-45 s of 86-97 s on floor 1 stood
+                          # still with nothing ahead (HIL 11-09 15:24, 15:29).
+                          # A person's 0.22 m, the dog's 0.2 m and 0.3 m between.
+PASS_LAT_V = 0.25         # m/s across: slower than this is walking along, not over
+PASS_HORIZON = 2.5        # s of their walk it has to hold for (tracking.HORIZON)
+LANE_LOOK = 2.0           # m along the route ahead of the dog's foot on it that
+                          # the map steers at, not the next waypoint: that can be
+                          # 20 m off, and a dog 0.5 m out of its lane after a
+                          # step round somebody took the length of the corridor
+                          # to get back -- on floor 1 it walked the middle (y
+                          # 9.25-9.44 for a lane at 8.87, HIL 11-09).
+LANE_TOL = 0.30           # m either side of the lane a VAMOS path may take it
 PASS_V = 0.40             # m/s while within PASS_R of them: walking past
 PASS_R = 2.0              # somebody, not overtaking them
 PASS_SIDE = 0.90          # metres either side of the dog's heading a standing
@@ -811,6 +876,7 @@ class Run:
         self.tracker = Tracker(self.robot.CONTROL_DT)
         self.waiting_for = None        # the track being yielded to, if any
         self.passing = None            # where the person being gone round stands
+        self.passer_near = False       # someone passing in another lane within PASS_R
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
@@ -1782,6 +1848,10 @@ class Run:
         four metres from a lift it never reached.
         """
         vel = (speed * math.cos(yaw), speed * math.sin(yaw))
+        # Walking past in another lane is not a conflict: see PASS_LAT.
+        passers = [t for t in tracks if t.moving and passes_by(xy, yaw, t)]
+        self.passer_near = any(math.dist(xy, (t.x, t.y)) < PASS_R for t in passers)
+        tracks = [t for t in tracks if t not in passers]
 
         held = self.waiting_for if self.waiting_for in tracks else None
         if held is not None:
@@ -2344,6 +2414,8 @@ class Run:
                         and not self.door_near(gates, (x, y), DOOR_MAP_D))
             if on_vamos:
                 tx, ty = path_target(rest, (x, y))
+                if i > 0:                                # held near the lane: see LANE_TOL
+                    tx, ty = in_lane((tx, ty), waypoints[i - 1], waypoints[i])
             elif offset:
                 # Nothing VAMOS offered survived the gate, but the goal has been
                 # moved clear of what the sensor found, so steer at that rather
@@ -2352,7 +2424,7 @@ class Run:
                 # ordinary waypoint-following the rest of the run depends on.
                 tx, ty = aim
             else:
-                tx, ty = waypoints[i]
+                tx, ty = lane_point((x, y), waypoints, i)
             at_door = False
             if not offset:
                 (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty))
@@ -2405,6 +2477,8 @@ class Run:
                 person = None
             else:
                 person = self.yield_to(tracks, (x, y), yaw, speed)
+                if person is None and self.passer_near:
+                    speed = min(speed, PASS_V)           # walking past someone: see PASS_LAT
             # And so does the safety factor: a path the dog only just believes
             # it can walk is walked at half pace.
             unseen = 0 if len(live.points) else unseen + 1
