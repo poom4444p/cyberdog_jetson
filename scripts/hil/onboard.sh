@@ -26,6 +26,8 @@
 #   LIFT_HOST                       where the world takes lift calls (the Mac)
 #   BOARD_CORES BRAIN_CORES         taskset lists
 #   TRACE=1                         brain prints its commands, ~5 lines/s
+#   TRACK_LOG=1                     brain writes every track, every tick, to
+#                                   $CYBERDOG/output/tracks.jsonl (--track-log)
 set -u
 
 CYBERDOG=${CYBERDOG:-$HOME/cyberdog_jetson}
@@ -91,10 +93,15 @@ case "${1:-}" in
     samples=${3:-2}
     cd "$CYBERDOG" && . "$GO2ENV/bin/activate" || exit 1
     if [ "$TRACE" = 1 ]; then run=("$HERE/trace_run_building.py"); else run=(-m cyberdog.sim.run_building); fi
+    tracklog=()
+    if [ "${TRACK_LOG:-0}" = 1 ]; then
+        mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/tracks.jsonl"
+        tracklog=(--track-log "$CYBERDOG/output/tracks.jsonl")
+    fi
     # MUJOCO_GL=egl: the camera view VAMOS is shown is rendered with no display
     # (23 ms a frame); on the dog it comes from a USB camera.
     MUJOCO_GL=egl exec taskset -c "$BRAIN_CORES" python -u "${run[@]}" "$dest" --robot go2_board \
-        --lift-host "$LIFT_HOST" --vamos --vamos-samples "$samples" --auto-confirm --no-video ;;
+        --lift-host "$LIFT_HOST" --vamos --vamos-samples "$samples" --auto-confirm --no-video "${tracklog[@]}" ;;
 
   stop)
     # [x]yz: matches the process, not a shell whose command line holds the pattern
