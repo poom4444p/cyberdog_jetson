@@ -24,6 +24,7 @@
 #   PY           Python with go2_world's packages   (python)
 #   PEOPLE       people walking in the world        (4)
 #   WORLD_ARGS   more run_world arguments, e.g. --held-pd
+#   LIDAR_ARGS   more run_lidar arguments, e.g. --imu-noise (a real unit's IMU)
 #   VIEWER=1     the world with MuJoCo's viewer (mjpython next to PY), to watch or
 #                screen-record a run; it can hold the physics long enough to trip
 #                the board's stale-state guard, so headless is the default
@@ -46,6 +47,7 @@ REMOTE=${REMOTE:-cyberdog_jetson}
 PY=${PY:-python}
 PEOPLE=${PEOPLE:-4}
 WORLD_ARGS=${WORLD_ARGS:-}
+LIDAR_ARGS=${LIDAR_ARGS:-}
 VIEWER=${VIEWER:-0}
 RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
@@ -105,9 +107,9 @@ start_world() {
     grep -q "people walking" "$OUT/world.log" || { echo "world: did not start, see $OUT/world.log"; exit 1; }
     grep -E "^world:|^lift:" "$OUT/world.log"
     (cd "$GO2_WORLD" || exit 1; nohup "$PY" -u scripts/run_lidar.py --interface "$MAC_IF" \
-        --host "${BOARD#*@}" > "$OUT/lidar.log" 2>&1 < /dev/null &)
+        --host "${BOARD#*@}" $LIDAR_ARGS > "$OUT/lidar.log" 2>&1 < /dev/null &)
     sleep 13                                   # the emulator loads the scene, then streams
-    grep -m1 "^mid360:" "$OUT/lidar.log" || { echo "lidar: not streaming, see $OUT/lidar.log"; exit 1; }
+    grep "^mid360:" "$OUT/lidar.log" | head -2 | grep . || { echo "lidar: not streaming, see $OUT/lidar.log"; exit 1; }
 }
 
 start_gaps() {
