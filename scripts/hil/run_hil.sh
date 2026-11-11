@@ -33,6 +33,8 @@
 #   TRACE=1      the brain prints its commands
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
+#   POSE=lio     the board reports the Mid-360's odometry as the dog's pose instead of the
+#                world's true one (needs small_gicp in ~/go2env); its error is in the board log
 #   LIO_RECORD=1 route: the board saves the raw Mid-360 frames, its IMU and the world's
 #                true pose (go2_board.record); copied to $OUT/lio/. With
 #                LIDAR_ARGS=--dense for the real unit's point rate
@@ -57,6 +59,7 @@ TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
 CLOUD_LOG=${CLOUD_LOG:-0}
 LIO_RECORD=${LIO_RECORD:-0}
+POSE=${POSE:-sim}
 LIO_DIR=lio_record                 # on the board, under ~
 ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
@@ -176,9 +179,9 @@ case "${1:-}" in
     start_world
     on_board "$ONBOARD vamos"
     if [ "$LIO_RECORD" = 1 ]; then
-        on_board "rm -rf ~/$LIO_DIR; LIO_RECORD=~/$LIO_DIR $ONBOARD board" | tail -2
+        on_board "rm -rf ~/$LIO_DIR; POSE=$POSE LIO_RECORD=~/$LIO_DIR $ONBOARD board" | tail -2
     else
-        on_board "$ONBOARD board" | tail -1
+        on_board "POSE=$POSE $ONBOARD board" | tail -1
     fi
     start_gaps
     on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
