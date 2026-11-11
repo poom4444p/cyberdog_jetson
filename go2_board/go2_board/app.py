@@ -51,6 +51,7 @@ class App:
         v = self.link.velocity()
         if self.lidar is not None:
             v = guard(*v, self.lidar.clearance(), t)
+            self.lidar.commanded(v[0], v[1], t)     # levelling: is the body accelerating
         self.modes.velocity = v
         return self.modes.step(state, t)
 

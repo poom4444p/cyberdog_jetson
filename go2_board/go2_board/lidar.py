@@ -76,7 +76,16 @@ BIAS_TAU_S = 2.0             # s over which the gyro's bias is learnt from what 
 ACC_TRUST = 0.2              # g away from 1 g at which the accelerometer is not
                              # trusted at all (linear in between): it is the body
                              # accelerating, not gravity
-TILT_SETTLE_S = 1.0          # s after the first sample over which gravity corrects
+CMD_DV = 0.10                # m/s the commanded velocity changes by before...
+ACC_HOLD_S = 0.75            # ...the accelerometer is ignored this long after (the
+                             # gyro alone carries the level). ACC_TRUST cannot see a
+                             # dog braking or starting: 2 m/s^2 forward moves the
+                             # reading 2 % off 1 g but tips it 11 deg, and gravity
+                             # correction followed it. HIL 11-11 12:38: braking from
+                             # 0.65 m/s at the server room, the floor 3-5 m ahead rose
+                             # to +0.15 m, a 5 m wide "obstacle", "Stopping. I have
+                             # no clear way past". 0.75 s covers the policy's lag.
+TILT_SETTLE_S = 1.0         # s after the first sample over which gravity corrects
 TILT_SETTLE_TAU_S = 0.1      # ...this fast: the first sample, taken as up, can be
                              # a body accelerating (a dog started while walking)
 TILT_KEEP_S = 0.5            # s of tilt history kept to level a frame's points with
@@ -121,7 +130,8 @@ class Tilt:
     from a sensor turning at w moves at -w x up); gravity pulls it back over
     TILT_TAU_S, less the further the accelerometer reads from 1 g. Kept for
     TILT_KEEP_S so a frame's points can each be levelled with the tilt of
-    the moment they were measured."""
+    the moment they were measured. `add(s, held=True)`: the body is known to
+    be speeding up or slowing down (ACC_HOLD_S), gyro only."""
 
     def __init__(self, up):
         self.up = np.asarray(up, float) / np.linalg.norm(up)
@@ -131,7 +141,7 @@ class Tilt:
         self.age = 0.0                   # s of samples since the first
         self.bias = np.zeros(3)          # rad/s, the gyro's, as learnt
 
-    def add(self, s):
+    def add(self, s, held=False):
         g = float(np.linalg.norm(s.acc))
         if g < 1e-6:
             return
@@ -143,6 +153,8 @@ class Tilt:
                 dt = IMU_DT
             self.age += dt
             trust = max(0.0, 1.0 - abs(g / 9.81 - 1.0) / ACC_TRUST)
+            if held and self.age >= TILT_SETTLE_S:
+                trust = 0.0              # no correction, and no bias learnt from it
             tau = TILT_SETTLE_TAU_S if self.age < TILT_SETTLE_S else TILT_TAU_S
             # Mahony: e turns the level towards gravity (proportional), and
             # what it keeps having to turn is the gyro's bias (integral).
@@ -322,6 +334,8 @@ class Lidar:
         self.tilt = Tilt(self.R_ts.T @ np.array([0.0, 0.0, 1.0]))  # the mount's, until the IMU says
         self.height = SENSOR_HEIGHT                          # sensor above the floor, per frame
         self.latest = None                                   # Clearance
+        self.cmd_ref = None                                  # (vx, vy) at the last change
+        self.hold_until = -math.inf                          # clock: accelerometer ignored till
         self.seq = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if brain else None
         self._stop = threading.Event()
@@ -359,9 +373,19 @@ class Lidar:
         pts[:, 2] += self.height
         return pts
 
+    def commanded(self, vx, vy, t):
+        """The velocity the walker is being given, at clock time t. A change
+        of more than CMD_DV is the body about to speed up or slow down: the
+        accelerometer is ignored until ACC_HOLD_S after the last one."""
+        if self.cmd_ref is None or math.hypot(vx - self.cmd_ref[0], vy - self.cmd_ref[1]) > CMD_DV:
+            if self.cmd_ref is not None:
+                self.hold_until = t + ACC_HOLD_S
+            self.cmd_ref = (vx, vy)
+
     def process(self, frames, samples):
+        held = self.clock() < self.hold_until
         for s in samples:                # specific force at rest points up
-            self.tilt.add(s)
+            self.tilt.add(s, held)
         for f in frames:
             pts = self.level(f.xyz, getattr(f, "t", None))
             now = self.clock()

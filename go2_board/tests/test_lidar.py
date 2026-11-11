@@ -189,9 +189,13 @@ def test_cloud_to_the_brain_whole_or_not_at_all():
 class FakeLidar:
     def __init__(self, c=None):
         self.c = c
+        self.cmds = []
 
     def clearance(self):
         return self.c
+
+    def commanded(self, vx, vy, t):
+        self.cmds.append((vx, vy))
 
 
 def test_app_limits_the_walker_and_reports_clearance():
@@ -210,6 +214,7 @@ def test_app_limits_the_walker_and_reports_clearance():
     inbox.say("walk", vx=0.4, w=0.2)
     run(a, 0.02)
     assert w.seen[-1] == (0.4, 0.0, 0.2)
+    assert a.lidar.cmds[-1] == (0.4, 0.0)       # the guarded command, for levelling
     a.lidar.c = C(front=0.1, stamp=clock())
     run(a, 0.02)
     assert w.seen[-1] == (0.0, 0.0, 0.2)
@@ -244,18 +249,21 @@ def rocking(t, amp=3.0, hz=2.0):
     return amp * math.sin(w * t), math.radians(amp) * w * math.cos(w * t)
 
 
-def trot_imu(t0, t1, bump=2.0, surge=1.0, gyro_bias=0.0):
+def trot_imu(t0, t1, bump=2.0, surge=1.0, gyro_bias=0.0, brake=None):
     """Mid-360 IMU samples at 200 Hz over [t0, t1) s of a rocking trunk: the gyro
     (about y, which the 20 deg mount shares with the trunk) and the specific
     force, with the body's own vertical bounce (`bump`) and forward surge
-    (`surge`), m/s^2, on it."""
+    (`surge`), m/s^2, on it. `brake` (from, seconds, m/s^2): slowing down,
+    which the accelerometer reads as a push forward."""
     out = []
     for k in range(int(round((t1 - t0) * 200))):
         t = t0 + k / 200
         pitch, rate = rocking(t)
         R_ws = L.mount_rotation(pitch) @ R_TS
-        acc = R_ws.T @ [surge * math.sin(2 * math.pi * 2.0 * t + 1.0), 0.0,
-                        9.81 + bump * math.sin(2 * math.pi * 4.0 * t)]
+        ax = surge * math.sin(2 * math.pi * 2.0 * t + 1.0)
+        if brake is not None and brake[0] <= t < brake[0] + brake[1]:
+            ax += brake[2]
+        acc = R_ws.T @ [ax, 0.0, 9.81 + bump * math.sin(2 * math.pi * 4.0 * t)]
         out.append(ImuSample(int(t * 1e9), np.array([0.0, rate + gyro_bias, 0.0]), acc))
     return out
 
@@ -301,6 +309,48 @@ def test_gyro_bias_is_learnt():
     li = Lidar(clock=Clock(), brain=None)
     assert worst_floor_tilt(li, t_end=30.0, t_from=15.0, gyro_bias=math.radians(1.0)) < 0.4
     assert math.degrees(li.tilt.bias[1]) == pytest.approx(1.0, abs=0.1)
+
+
+def braking_floor_tilt(tell_the_lidar):
+    """Trot at 0.65 m/s, then from 4.0 s brake at 1.6 m/s^2 for 0.4 s (HIL
+    11-11 12:38, the server room); the worst floor tilt from 4 s on, deg."""
+    clock = Clock(0.0)
+    li = Lidar(clock=clock, brain=None)
+    li.commanded(0.65, 0.0, 0.0)
+    brake = (4.0, 0.4, 1.6)
+    li.process([], trot_imu(0.0, 1.0, brake=brake))
+    worst, t = 0.0, 1.0
+    while t < 6.0:
+        clock.t = t
+        if tell_the_lidar and t >= 3.95:
+            li.commanded(0.0, 0.0, t)
+        li.process([], trot_imu(t, t + 0.1, brake=brake))
+        f = trot_frame(t)
+        pts = li.level(f.xyz, f.t)
+        floor = pts[(pts[:, 0] > 1.0) & (pts[:, 0] < 4.5) & (pts[:, 2] < 0.3)]
+        if t >= 4.0:
+            worst = max(worst, abs(math.degrees(math.atan(np.polyfit(floor[:, 0], floor[:, 2], 1)[0]))))
+        t += 0.1
+    return worst
+
+
+def test_a_braking_dog_sees_a_level_floor():
+    # told the command dropped: gyro only through the braking
+    assert braking_floor_tilt(True) < 0.6
+    # not told (the old board): gravity correction follows the braking push
+    # and the floor tilts ~1.6 deg, 0.13 m at 4.5 m -- over the brain's 0.08
+    assert braking_floor_tilt(False) > 1.2
+
+
+def test_only_a_real_change_of_command_holds_the_accelerometer():
+    li = Lidar(clock=Clock(0.0), brain=None)
+    li.commanded(0.60, 0.0, 0.0)
+    li.commanded(0.65, 0.05, 1.0)               # steering noise: < CMD_DV
+    assert li.hold_until == -math.inf
+    li.commanded(0.40, 0.0, 2.0)
+    assert li.hold_until == pytest.approx(2.0 + L.ACC_HOLD_S)
+    li.commanded(0.40, 0.0, 2.5)                # steady again: the hold runs out
+    assert li.hold_until == pytest.approx(2.0 + L.ACC_HOLD_S)
 
 
 def test_gravity_alone_could_not_follow_the_trot():
