@@ -190,3 +190,46 @@ def test_a_sensor_that_starts_again_is_followed_not_dropped():
     new = feed_all(a, frame(0) + frame(100) + frame(200))
     assert len(old) == 1 and a.restarts == 1
     assert len(new) == 2 and new[0].stamp == 0 and new[0].packets == 5 and a.late == 0
+
+
+# --- the receive buffer (RCVBUF) ----------------------------------------------
+
+class FakeSock:
+    """setsockopt refuses anything over `limit` (macOS), or caps silently at
+    `cap` and reports twice that (Linux)."""
+    def __init__(self, limit=None, cap=None, doubles=False):
+        self.limit, self.cap, self.doubles, self.size = limit, cap, doubles, 0
+
+    def setsockopt(self, level, opt, value):
+        if self.limit is not None and value > self.limit:
+            raise OSError(55, "No buffer space available")
+        self.size = value if self.cap is None else min(value, self.cap)
+
+    def getsockopt(self, level, opt):
+        return 2 * self.size if self.doubles else self.size
+
+
+def test_a_refused_size_is_halved_until_one_is_taken(monkeypatch):
+    from go2_board import livox
+    monkeypatch.setattr(livox.sys, "platform", "darwin")
+    assert livox._ask_rcvbuf(FakeSock(limit=3 << 20), 8 << 20) == 2 << 20
+
+
+def test_linux_silently_capped_is_seen_as_capped(monkeypatch):
+    # The J4012 before net.core.rmem_max was raised: 212,992 bytes, reported doubled.
+    from go2_board import livox
+    monkeypatch.setattr(livox.sys, "platform", "linux")
+    got = livox._ask_rcvbuf(FakeSock(cap=212_992, doubles=True), livox.RCVBUF)
+    assert got == 212_992 and got < livox.RCVBUF // 2
+    assert livox._ask_rcvbuf(FakeSock(cap=16 << 20, doubles=True), livox.RCVBUF) == livox.RCVBUF
+
+
+def test_the_receiver_reports_what_it_was_granted():
+    from go2_board.livox import RCVBUF
+    rx = LivoxReceiver("127.0.0.1", 19761, 19762, rcvbuf=1 << 20)
+    try:
+        assert 0 < rx.rcvbuf <= 1 << 20 and rx.stats()["rcvbuf"] == rx.rcvbuf
+        assert rx.rcvbuf_short == (rx.rcvbuf < (1 << 20) // 2)
+        assert RCVBUF >= 4 << 20                       # ~300 KB a dense frame, with room
+    finally:
+        rx.close()

@@ -28,12 +28,22 @@ asked to keep them. IMU acceleration is in g on the wire, gyro in rad/s.
 """
 import socket
 import struct
+import sys
 import zlib
 
 import numpy as np
 
 POINT_PORT = 56301           # host side
 IMU_PORT = 56401
+# The receive buffer asked for: ~25 frames of the real unit's ~300 KB. Linux
+# grants no more than net.core.rmem_max (212,992 bytes by default), silently:
+# with the dense stream the J4012 dropped 12 % of the packets (33,628 in a
+# route, 145,167 "receive buffer errors" in netstat -su) whenever the LiDAR
+# thread fell a few ms behind, and 598 of 1302 frames arrived partial (HIL
+# 11-11 15:39). What was granted is read back and checked (rcvbuf_short).
+RCVBUF = 8 << 20
+RCVBUF_FIX = ("sudo sysctl -w net.core.rmem_max=16777216; to keep it: "
+              "echo net.core.rmem_max=16777216 | sudo tee /etc/sysctl.d/90-livox.conf")
 HEADER = struct.Struct("<BHHHHBBB12sIQ")
 HEADER_SIZE = 36
 IMU, CARTESIAN_HIGH, CARTESIAN_LOW = 0, 1, 2
@@ -203,13 +213,27 @@ class FrameAssembler:
         return frame
 
 
-def _socket(port, host):
+def _ask_rcvbuf(sock, asked):
+    """Ask for `asked` bytes, halving on refusal; returns what was granted."""
+    size = asked
+    while size >= 1 << 16:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, size)
+            break
+        except OSError:
+            size //= 2
+    got = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    # Linux doubles what it reports; never count that as more than asked.
+    return min(got // 2 if sys.platform.startswith("linux") else got, asked)
+
+
+def _socket(port, host, rcvbuf=RCVBUF):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)   # a dense frame is ~300 KB
+    got = _ask_rcvbuf(s, rcvbuf)
     s.bind((host, port))
     s.setblocking(False)
-    return s
+    return s, got
 
 
 class LivoxReceiver:
@@ -217,9 +241,12 @@ class LivoxReceiver:
     which on the J4012 is what the real sensor, sending to its configured host
     IP, needs."""
 
-    def __init__(self, host="", point_port=POINT_PORT, imu_port=IMU_PORT, keep_empty=False):
-        self.points = _socket(point_port, host)
-        self.imu = _socket(imu_port, host)
+    def __init__(self, host="", point_port=POINT_PORT, imu_port=IMU_PORT, keep_empty=False,
+                 rcvbuf=RCVBUF):
+        self.points, self.rcvbuf = _socket(point_port, host, rcvbuf)
+        self.imu, _ = _socket(imu_port, host, rcvbuf)
+        # Less than half of what was asked: the kernel capped it (RCVBUF).
+        self.rcvbuf_short = self.rcvbuf < rcvbuf // 2
         self.frames = FrameAssembler(keep_empty)
         self.packets = self.bad = self.imu_count = 0
         self.last_error = None
@@ -254,7 +281,8 @@ class LivoxReceiver:
 
     def stats(self):
         a = self.frames
-        return {"packets": self.packets, "bad": self.bad, "frames": a.frames, "lost": a.lost,
+        return {"packets": self.packets, "bad": self.bad, "rcvbuf": self.rcvbuf,
+                "frames": a.frames, "lost": a.lost,
                 "late": a.late, "frames_skipped": a.frames_skipped, "imu": self.imu_count,
                 "last_error": self.last_error}
 

@@ -17,6 +17,7 @@ from go2_board.link import BRAIN_PORT, HOST, BoardLink
 from go2_board.lidar import BRAIN_CLOUD_PORT
 from go2_board.board import Board
 from go2_board.safety import STALE_S
+from go2_board import livox
 from go2_board.lidar import Lidar
 from go2_board.sim_bus import SimBus
 from go2_board.walker import PolicyWalker
@@ -61,6 +62,12 @@ if lidar is not None and args.record:
     print(f"[board] recording Mid-360 frames, IMU and the bus pose to {args.record}")
 if lidar is not None:
     lidar.start()
+    rx = lidar.rx
+    print(f"[board] Mid-360 receive buffer {rx.rcvbuf / 2**20:.1f} MB")
+    if rx.rcvbuf_short:
+        print(f"[board] WARNING: the kernel capped the Mid-360 receive buffer at "
+              f"{rx.rcvbuf // 1024} KB: a dense frame is ~300 KB, so packets will be "
+              f"lost and frames dropped as partial. Fix: {livox.RCVBUF_FIX}")
 stale_s = STALE_S if args.stale_ms is None else args.stale_ms / 1e3
 if stale_s != STALE_S:
     print(f"[board] WARNING: stale-state limit {stale_s * 1e3:.0f} ms, not {STALE_S * 1e3:.0f}: "

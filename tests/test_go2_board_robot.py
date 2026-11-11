@@ -269,3 +269,22 @@ def test_pose_at_interpolates_the_boards_recent_states(pair):
     assert robot.pose_at(1.05) == pytest.approx((10.0, 5.5, math.pi / 2), abs=1e-6)
     assert robot.pose_at(0.5) == pytest.approx((10.0, 5.0, math.pi / 2), abs=1e-6)
     assert robot.pose_at(9.0) == pytest.approx((10.0, 6.0, math.pi / 2), abs=1e-6)
+
+
+def test_twin_rides_out_a_short_gap_in_the_boards_state(twin):
+    # HIL 11-11 15:52: the board's loop stalled 201 ms, its state went stale
+    # between two reads in _follow, and the brain died on a TypeError.
+    robot, board = twin
+    board.send_state(x=1.0, y=0.5, z=0.12, yaw=0.0, mode="WALK", tripped=None, walker=True)
+    settle()
+    robot._follow()
+    here = robot.get_pose()
+    t = [robot.board.clock()]
+    robot.board.clock = lambda: t[0]
+    t[0] += 0.5                                     # stale: no state for half a second
+    robot._follow()                                 # no TypeError, no stop
+    assert robot.get_pose() == here
+    t[0] += robot.NO_STATE_S + 0.1                  # ...and then for longer than NO_STATE_S
+    from cyberdog.sim.robot.go2_board_robot import BoardStopped
+    with pytest.raises(BoardStopped, match="no state from the board"):
+        robot._follow()

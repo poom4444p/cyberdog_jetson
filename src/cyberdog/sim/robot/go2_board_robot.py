@@ -217,10 +217,12 @@ class BoardTwinRobot(MujocoRobot):
     ARRIVED_M, SETTLE_S, RIDE_TIMEOUT_S = 0.05, 1.0, 60.0
 
     CLOUD_STALE_S = 0.5       # an older cloud is no cloud: the brain is blind, as the board is
+    NO_STATE_S = 1.0          # no board state this long mid-walk ends the run (see _follow)
 
     def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0),
                  board_host=None, listen=None, lift=None, clouds=True):
         self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
+        self._no_state_since = None    # board clock since when no state came, in _follow
         self.lift = lift          # LiftLink, for rides; None: no floor but the first
         # The Mid-360 as the board sees it, forwarded on 9872: what the brain
         # perceives with, as on the dog. clouds=False keeps the twin's own
@@ -334,9 +336,26 @@ class BoardTwinRobot(MujocoRobot):
         self.board.request("walk", until="WALK", timeout=5.0)
 
     def _follow(self):
-        x, y, yaw = self.board.get_pose()
-        MujocoRobot.place(self, (x, y), yaw)
+        """Put the twin where the board says the dog is, from ONE state read.
+
+        It read the state twice (get_pose, then board_state) and the second
+        read could find it gone stale in between: the board's loop stalled
+        201 ms (HIL 11-11 15:52, dense LiDAR), board_state() returned None and
+        the brain died on a TypeError mid-corridor. A gap shorter than
+        NO_STATE_S is ridden out (the twin stays where it last was, the next
+        tick asks again); a longer one ends the run, saying why."""
         s = self.board.board_state()
+        if s is None or s.get("x") is None:
+            now = self.board.clock()
+            if self._no_state_since is None:
+                self._no_state_since = now
+            if now - self._no_state_since > self.NO_STATE_S:
+                raise BoardStopped(f"no state from the board for more than {self.NO_STATE_S:.1f} s "
+                                   "(its loop stalled, or it stopped)")
+            return
+        self._no_state_since = None
+        x, y, yaw = self.board._to_map(s)
+        MujocoRobot.place(self, (x, y), yaw)
         if s["mode"] != "WALK":
             why = f": {s['tripped']}" if s.get("tripped") else ""
             raise BoardStopped(f"the board is {s['mode']}, not walking{why}")
