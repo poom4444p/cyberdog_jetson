@@ -255,6 +255,147 @@ def overtaking(xy, yaw, t, speed=0.0):
     return fwd < 0.0 or v_fwd > speed + PULL_DV
 
 
+def lane_dir(xy, waypoints, i, yaw):
+    """Unit vector along the lane the dog is walking: its current route
+    segment, or its heading when there is none yet."""
+    a = waypoints[i - 1] if i > 0 else xy
+    b = waypoints[i]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = math.hypot(dx, dy)
+    if n < 1e-6:
+        return (math.cos(yaw), math.sin(yaw))
+    return (dx / n, dy / n)
+
+
+def leader(xy, u, tracks, speed, lane_off=0.0, keep=None):
+    """The nearest person ahead in the dog's lane walking its way slower than
+    it, within FOLLOW_LOOK; or None. Ahead means past OVERTAKE_AHEAD: nearer
+    than that they are beside it, and somebody overtaking at 0.85 m/s, level
+    with the dog 0.68 m to its left, stood it still as a leader 0.09 m
+    ahead (HIL 11-10 15:42, t 35.1). `u` is the lane direction; `lane_off`
+    how far left of its lane the dog is walking (an overtake), so that the
+    lane is the lane and not the dog. `keep`: the one already being
+    followed, who stays the leader down to LEAD_KEEP_V (see there)."""
+    best, bd = None, FOLLOW_LOOK
+    for t in tracks:
+        if not (t.moving or t.walked):
+            continue
+        fwd = (t.x - xy[0]) * u[0] + (t.y - xy[1]) * u[1]
+        lat = -(t.x - xy[0]) * u[1] + (t.y - xy[1]) * u[0] + lane_off
+        v_fwd = t.vx * u[0] + t.vy * u[1]
+        v_lat = -t.vx * u[1] + t.vy * u[0]
+        if not OVERTAKE_AHEAD < fwd < bd or abs(lat) >= PASS_LAT:
+            continue
+        v_min = LEAD_KEEP_V if t is keep else CROSS_V
+        if v_fwd < v_min or abs(v_lat) > max(PASS_LAT_V, 0.5 * v_fwd):
+            continue                       # not walking the dog's way
+        if v_fwd >= speed:
+            continue                       # not closing on them: nothing to follow
+        best, bd = t, fwd
+    return best
+
+
+def follow_speed(gap, v_lead):
+    """Forward speed that keeps FOLLOW_GAP behind somebody walking at
+    `v_lead`: their pace, plus FOLLOW_K per metre too far back; nothing at
+    FOLLOW_MIN or closer. Never backwards (see BACK_V)."""
+    if gap <= FOLLOW_MIN:
+        return 0.0
+    return max(0.0, v_lead + FOLLOW_K * (gap - FOLLOW_GAP))
+
+
+def straight_ahead(xy, route):
+    """Metres of route ahead of `xy` before it turns by more than PLAN_CORNER
+    (or ends)."""
+    pts = [tuple(xy)] + [tuple(p) for p in route]
+    walked, heading = 0.0, None
+    for a, b in zip(pts, pts[1:]):
+        d = math.dist(a, b)
+        if d < 1e-6:
+            continue
+        h = math.atan2(b[1] - a[1], b[0] - a[0])
+        if heading is not None and abs(wrap(h - heading)) > PLAN_CORNER:
+            return walked
+        heading = h
+        walked += d
+    return walked
+
+
+def overtake_plan(xy, u, lead, others, cruise, shift=None, started=False, v_lead=None):
+    """(seconds, metres, their pace) an overtake of `lead` takes at `cruise` -- from where
+    the dog is to OVERTAKE_BACK past them, on the line `shift` left of where
+    the dog is (OVERTAKE_LAT left of its lane) -- or None when it is not worth one (less than OVERTAKE_DV
+    faster than them) or somebody else would come within OVERTAKE_CLEAR of
+    that line meanwhile: oncoming people in the other lane, mostly.
+    `started`: a pass already under way, which only somebody else stops.
+    `v_lead`: their pace, if known better than this tick's velocity."""
+    if v_lead is None:
+        v_lead = lead.vx * u[0] + lead.vy * u[1]
+    dv = cruise - v_lead
+    if dv < OVERTAKE_DV:
+        if not started:
+            return None
+        # Once under way, their measured pace is noise round what it was
+        # (0.3-0.6 m/s for somebody walking 0.42, HIL 11-10 16:11): it does
+        # not call the pass off, and every tick it did was a new one.
+        dv = OVERTAKE_DV
+    gap = (lead.x - xy[0]) * u[0] + (lead.y - xy[1]) * u[1]
+    secs = (gap + OVERTAKE_BACK) / dv
+    shift = OVERTAKE_LAT if shift is None else shift
+    start = (xy[0] - u[1] * shift, xy[1] + u[0] * shift)
+    vel = (u[0] * cruise, u[1] * cruise)
+    for t in others:
+        if t is lead:
+            continue
+        d = closest_approach(start, vel, (t.x, t.y), (t.vx, t.vy), horizon=secs)
+        if d - min(t.r, 0.4) < OVERTAKE_CLEAR:
+            return None
+    return secs, cruise * secs, v_lead
+
+
+class Pace:
+    """How much of a straight forward command the dog actually walks, by its
+    own clock: metres along its heading per second against the command that
+    moved it, each smoothed over PACE_TAU, counted once PACE_TAU of straight
+    walking has been seen. Overtaking is judged on what the dog walks, not
+    what it is told: in HIL the physics runs ~0.83x the board's clock, and
+    somebody walking 0.65 m/s read 0.54 against a commanded 0.8 -- 0.26
+    slower, so overtaken, when the dog was really doing 0.67 (HIL 11-10
+    16:13). The real dog's policy need not walk 0.8 m/s for 0.8 either."""
+
+    def __init__(self):
+        self.v = self.c = self.seen = 0.0
+        self.prev = None
+
+    def update(self, t, x, y, yaw, cmd):
+        """The pose now (t: the brain's clock) and the command sent now."""
+        if self.prev is not None:
+            t0, x0, y0, yaw0, c0 = self.prev
+            dt = t - t0
+            if (0.0 < dt < 0.5 and c0[0] >= PACE_MIN_CMD and abs(c0[1]) < 1e-6
+                    and abs(c0[2]) < PACE_MAX_W):
+                v = ((x - x0) * math.cos(yaw0) + (y - y0) * math.sin(yaw0)) / dt
+                a = min(1.0, dt / PACE_TAU)
+                self.v += a * (v - self.v)
+                self.c += a * (c0[0] - self.c)
+                self.seen += dt
+        self.prev = (t, x, y, yaw, tuple(cmd))
+
+    @property
+    def known(self):
+        """Seen enough straight walking to believe: until then nobody is
+        overtaken -- the first one at 16:21 (HIL 11-10) was judged on 0.8 s
+        of it, the command taken for the pace, and somebody to follow was
+        passed instead."""
+        return self.seen >= PACE_TAU and self.c > 0.0
+
+    @property
+    def ratio(self):
+        if not self.known:
+            return 1.0
+        return min(max(self.v / self.c, PACE_LO), 1.0)
+
+
 def small_thing_beside(info, tracks, static_at):
     """Something person-sized standing on the other side of the pinch from the
     crossing free_destination chose, on floor the map calls open: the reason
@@ -397,6 +538,43 @@ PASS_R = 2.0              # somebody, not overtaking them
 PASS_SIDE = 0.90          # metres either side of the dog's heading a standing
                           # person must be to be passed slowly: PASS_NEED plus
                           # the dog's half-width
+# Somebody ahead in the dog's lane walking its way, slower than it: followed,
+# not waited for. conflict() saw them as a meeting (the dog closes on them) and
+# every one was "Someone ahead. Waiting." or a CE-RRT* plan round them each
+# replan. Followed at their pace, and overtaken on the left when that is worth
+# it and the left is clear for as long as it takes.
+FOLLOW_LOOK = 6.0         # m ahead along the lane a leader is looked for
+FOLLOW_GAP = 1.5          # m, dog centre to theirs, kept behind them
+FOLLOW_K = 0.5            # m/s per metre of gap over FOLLOW_GAP: closes it gently
+FOLLOW_MIN = 1.0          # m: at or under this the dog stands
+OVERTAKE_DV = 0.25        # m/s slower than the dog's pace before overtaking: less
+                          # and the pass takes 12 s and 10 m of corridor
+OVERTAKE_LAT = 1.2        # m left of the lane the dog passes on: FOLLOW_MIN
+                          # beside them, and a margin -- steering at a lane point
+                          # LANE_LOOK ahead only creeps up on the shifted line
+                          # (1.0 reached 0.95 by the time it drew level). Floor
+                          # 1: lane 8.87, line 10.07, north wall 10.85.
+                          # (PASS_LAT's 0.75 would be closer beside them than
+                          # behind them.)
+OVERTAKE_BACK = 1.5       # m past them before it moves back into its lane
+OVERTAKE_CLEAR = 1.0      # m anybody else must stay from the passing line
+PACE_MIN_CMD = 0.4        # m/s forward commanded before a tick counts for Pace
+PACE_MAX_W = 0.2          # rad/s of turn under which it counts: walking straight
+PACE_TAU = 2.0            # s smoothed over, and seen before it is believed
+PACE_LO = 0.5             # the least fraction believed (a stall is not a pace)
+LEAD_TAU = 2.0            # s the pace of somebody ahead is smoothed over, and
+LEAD_SEEN = 1.0           # s they are watched before an overtake is judged on it:
+                          # one tick read 0.41 m/s of somebody walking 0.54, the
+                          # next 0.80 (HIL 11-10 16:26), and the 0.41 was passed
+LEAD_KEEP_V = 0.1         # m/s along the lane the one being followed must keep up
+                          # to stay the leader (a new one needs CROSS_V): somebody
+                          # walking 0.33 (brain clock) read 0.24-0.41 tick to tick,
+                          # dropped out under CROSS_V every other tick, and
+                          # LEAD_SEEN never came round (HIL 11-11 09:37, --walker 0.4)
+LEAD_GRACE = 0.3          # s the one being followed may go unseen as the leader
+                          # (a missed tick) before their pace and LEAD_SEEN restart
+REACQUIRE_R = 0.6         # m from where the one being overtaken was heading that
+                          # a new track is taken for them (tracks break)
 # No stepping back from them first. It was tried: reversing pushes the rigid
 # handle into the person holding it, and nothing the dog senses knows they
 # are there -- seed 8 of room 201 backed them into a wall for 9 s. A standoff
@@ -984,6 +1162,12 @@ class Run:
         self.narrow_at = -INF          # when the dog last had a narrow way ahead
         self.narrow_side = 0.0         # ...and which side it was on
         self.overtake_said_at = {}     # side -> when it was last said
+        self.passing_lead = None       # the track being overtaken (see FOLLOW_GAP)
+        self.follow_said_at = -INF     # when "Following someone ahead" was last true
+        self.pass_said_at = -INF       # ...and "Passing someone on your left"
+        self.pace = Pace()             # what the dog walks for what it is told
+        self.lead_track, self.lead_t = None, 0.0   # the one ahead being watched...
+        self.lead_v, self.lead_seen = 0.0, 0.0     # ...their smoothed pace, and for how long
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
@@ -2170,7 +2354,7 @@ class Run:
         self.plans["ticks"] += 1
         return path_target(rest, (x, y)), None
 
-    def mention_overtakers(self, behind, xy, yaw):
+    def mention_overtakers(self, behind, xy, yaw, speed=0.0):
         """Tell the person on the handle that somebody is passing close, and on
         which side -- they will feel them go by and cannot see them -- once a
         person: an overtaker a little faster than the dog is beside it for
@@ -2182,6 +2366,9 @@ class Run:
                 continue
             fwd = (t.x - xy[0]) * c + (t.y - xy[1]) * s
             lat = -(t.x - xy[0]) * s + (t.y - xy[1]) * c
+            if t.vx * c + t.vy * s < speed:
+                continue                  # slower than the dog: falling back, not passing
+                                          # (the one it has just overtaken, HIL 11-10 16:19)
             if not -HANDLER_BEHIND - 1.0 < fwd < OVERTAKE_AHEAD or abs(lat) > PASS_R:
                 continue                  # not beside either of them
             if abs(lat) < SIDE_DEAD:
@@ -2192,6 +2379,95 @@ class Run:
                 self.say(f"Someone passing on your {'left' if side > 0 else 'right'}.")
                 self.overtake_said_at[side] = now
             return
+
+    def follow_lead(self, tracks, xy, yaw, waypoints, i, gates, cruise, can_pass=True):
+        """(forward speed cap or None, metres left of the lane to steer, the
+        person being followed or overtaken or None). See FOLLOW_GAP.
+
+        Somebody slower ahead in the dog's lane is followed FOLLOW_GAP behind,
+        or, when they are OVERTAKE_DV slower than `cruise`, the route stays
+        straight and clear of doors for the whole pass, and nobody else comes
+        near the passing line meanwhile (overtake_plan), overtaken on the left
+        and left OVERTAKE_BACK behind before the dog moves back in. A pass
+        that gets blocked while the dog is still FOLLOW_MIN behind them drops
+        back to following; once beside them it is finished (anybody coming is
+        then the ordinary yield's business). `can_pass` False: follow only
+        (Pace not known yet)."""
+        u = lane_dir(xy, waypoints, i, yaw)
+        a = waypoints[i - 1] if i > 0 else xy
+        dog_lat = -(xy[0] - a[0]) * u[1] + (xy[1] - a[1]) * u[0]
+        now = self.robot.now()
+
+        def fwd_of(t):
+            return (t.x - xy[0]) * u[0] + (t.y - xy[1]) * u[1]
+
+        t = self.passing_lead
+        if t is not None and t not in tracks:
+            # A track breaks and comes back as a new one: take whoever is
+            # where they were heading, or the pass is over.
+            px, py = t.x + t.vx * self.robot.CONTROL_DT, t.y + t.vy * self.robot.CONTROL_DT
+            t = min(tracks, key=lambda q: math.dist((q.x, q.y), (px, py)), default=None)
+            if t is not None and math.dist((t.x, t.y), (px, py)) > REACQUIRE_R:
+                t = None
+        if t is not None:
+            gap = fwd_of(t)
+            if gap < -OVERTAKE_BACK:
+                t = None                                  # past them: back into the lane
+            elif gap > FOLLOW_MIN and overtake_plan(xy, u, t, tracks, cruise,
+                                                    OVERTAKE_LAT - dog_lat, True) is None:
+                t = None                                  # blocked: drop back and follow
+            else:
+                self.passing_lead = t
+                self.pass_said_at = now
+                # Not drawing level until out to the side by FOLLOW_MIN: no
+                # closing in faster than they walk while still less.
+                lat = -(t.x - xy[0]) * u[1] + (t.y - xy[1]) * u[0]
+                cap = None
+                if gap > 0.0 and abs(lat) < FOLLOW_MIN:
+                    v_lead = t.vx * u[0] + t.vy * u[1]
+                    cap = max(follow_speed(gap, v_lead), v_lead)
+                return cap, OVERTAKE_LAT, t
+        self.passing_lead = None
+
+        lead = leader(xy, u, tracks, cruise, dog_lat, keep=self.lead_track)
+        if lead is None:
+            # A tick or two without them is kept (LEAD_GRACE): their pace and
+            # how long they were watched carry on if they come back.
+            if self.lead_track is not None and now - self.lead_t > LEAD_GRACE:
+                self.lead_track = None
+            return None, 0.0, None
+        gap = fwd_of(lead)
+        # Their pace, smoothed over LEAD_TAU, carried over a broken track.
+        v_now = lead.vx * u[0] + lead.vy * u[1]
+        prev = self.lead_track
+        same = prev is not None and (lead is prev or math.dist(
+            (lead.x, lead.y), (prev.x + prev.vx * (now - self.lead_t),
+                               prev.y + prev.vy * (now - self.lead_t))) < REACQUIRE_R)
+        if same:
+            dt = max(0.0, now - self.lead_t)
+            self.lead_v += min(1.0, dt / LEAD_TAU) * (v_now - self.lead_v)
+            self.lead_seen += dt
+        else:
+            self.lead_v, self.lead_seen = v_now, 0.0
+        self.lead_track, self.lead_t = lead, now
+        plan = overtake_plan(xy, u, lead, tracks, cruise, OVERTAKE_LAT - dog_lat,
+                             v_lead=self.lead_v)
+        if (can_pass and self.lead_seen >= LEAD_SEEN and plan is not None and plan[1] <= straight_ahead(xy, waypoints[i:])
+                and not Run.door_near(gates, xy, plan[1])):
+            self.passing_lead = lead
+            if now - self.pass_said_at > OVERTAKE_SAY_S:
+                self.say("Passing someone on your left.")
+            self.pass_said_at = now
+            return max(follow_speed(gap, plan[2]), plan[2]), OVERTAKE_LAT, lead
+        cap = follow_speed(gap, lead.vx * u[0] + lead.vy * u[1])
+        if cap < cruise:
+            # Said once the dog is held back by them, not while they are
+            # still far enough ahead to make no difference (HIL 11-10 15:42,
+            # t 21.0: 5.6 m ahead, the cap 2.8 m/s).
+            if now - self.follow_said_at > OVERTAKE_SAY_S:
+                self.say("Following someone ahead.")
+            self.follow_said_at = now
+        return cap, 0.0, lead
 
     def step_aside(self, live, tracks, pose):
         """Sideways m/s for a waiting dog to get out of somebody's way, or 0.
@@ -2364,6 +2640,20 @@ class Run:
             # since last tick. A crate answers "none of me".
             tracks = self.tracker.update(live.points)
             walking = self.tracker.movers()
+            # Somebody slower ahead in the lane: followed, or overtaken on the
+            # left (see FOLLOW_GAP). Asked before anything plans round them:
+            # somebody walking 0.4-0.5 m/s is under MOVING_V most ticks, and
+            # free_destination stepped round them as round a crate, at DETOUR
+            # pace, instead (HIL 11-10 16:11, --walker 0.5).
+            # Judged on the pace the dog really walks (Pace); the cap it
+            # returns is in those terms, so it is scaled back up to a command.
+            cruise = self.robot.MAX_V * self.router.behavior.query_actions(x, y)["speed_modifier"]
+            pace = self.pace.ratio
+            follow_cap, pass_shift, lead = self.follow_lead(tracks, (x, y), yaw, waypoints, i,
+                                                            gates, cruise * pace,
+                                                            can_pass=self.pace.known)
+            if follow_cap is not None:
+                follow_cap /= pace
             if self.track_log is not None:
                 # What the tracker believed and where everybody really was,
                 # every tick: scripts/ce_rrt_calibrate.py measures the
@@ -2392,12 +2682,14 @@ class Run:
                     fwd = (t.x - x) * c + (t.y - y) * s_
                     side = abs(-(t.x - x) * s_ + (t.y - y) * c)
                     if (t.walked and not t.moving and 0 < fwd < PASS_R
-                            and side < PASS_SIDE):
+                            and side < PASS_SIDE and t is not lead):
                         self.passing = (t.x, t.y)
                         break
             # Out of the planning field, still in the safety one. A person is
             # waited for; only a crate is gone round. See LiveClearance.exclude.
-            live.exclude([(t.x, t.y, t.r) for t in walking])
+            live.exclude([(t.x, t.y, t.r) for t in walking]
+                         + ([(lead.x, lead.y, lead.r)] if lead is not None
+                            and lead not in walking else []))
             live.remember([(t.x, t.y, t.r) for t in tracks if t.walked],
                           self.robot.now(), (x, y))
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
@@ -2597,7 +2889,11 @@ class Run:
             # of walking later, and a path walked to its end is spent, not a
             # reason to turn round for its first point.
             rest = ahead(chosen, (x, y)) if chosen else []
+            # An overtake (follow_lead, above) steers OVERTAKE_LAT left of the
+            # lane point; VAMOS, which would hold the dog in its lane, waits
+            # until it is back.
             on_vamos = (len(rest) >= 2 and state["state"] == "TRACK" and not offset
+                        and not pass_shift
                         and not self.door_near(gates, (x, y), DOOR_MAP_D))
             if on_vamos:
                 tx, ty = path_target(rest, (x, y))
@@ -2612,6 +2908,9 @@ class Run:
                 tx, ty = aim
             else:
                 tx, ty = lane_point((x, y), waypoints, i)
+                if pass_shift:
+                    ux, uy = lane_dir((x, y), waypoints, i, yaw)
+                    tx, ty = tx - uy * pass_shift, ty + ux * pass_shift
             at_door = False
             if not offset:
                 (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty))
@@ -2641,7 +2940,7 @@ class Run:
             err = wrap(math.atan2(ty - y, tx - x) - yaw)
             # Zones slow the dog down as well as stopping it: "grass ahead" is
             # a speed modifier, not just a sentence.
-            speed = self.robot.MAX_V * self.router.behavior.query_actions(x, y)["speed_modifier"]
+            speed = cruise
             # People first, and before every other speed rule below: none of
             # them can see that the thing ahead is walking. free_destination would
             # happily route the dog through the gap behind somebody, and the
@@ -2650,9 +2949,12 @@ class Run:
             # waited for, not gone round, not stepped away from by stopping.
             # They stay in every prediction (plans, step aside, the handle).
             behind = [t for t in tracks if overtaking((x, y), yaw, t, speed)]
-            self.mention_overtakers(behind, (x, y), yaw)
+            self.mention_overtakers(behind, (x, y), yaw, speed * pace)
+            # ...and the one being followed or overtaken is not waited for or
+            # gone round either: follow() has them.
+            led = behind + ([lead] if lead is not None else [])
             round_to, close = (self.go_round(live, tracks, (x, y, yaw), waypoints[i:],
-                                             gates, n, speed, ignore=behind)
+                                             gates, n, speed, ignore=led)
                                if self.planner == "cerrt" else (None, None))
             if round_to is None and close is not None:
                 # Somebody within NEAR_R walking into the dog's way, and no
@@ -2668,10 +2970,12 @@ class Run:
                 speed = min(speed, self.plan.v)
                 person = None
             else:
-                person = self.yield_to([t for t in tracks if t not in behind],
+                person = self.yield_to([t for t in tracks if t not in led],
                                        (x, y), yaw, speed)
                 if person is None and self.passer_near:
                     speed = min(speed, PASS_V)           # walking past someone: see PASS_LAT
+            if follow_cap is not None:
+                speed = min(speed, follow_cap)           # behind someone: see FOLLOW_GAP
             # And so does the safety factor: a path the dog only just believes
             # it can walk is walked at half pace.
             unseen = 0 if len(live.points) else unseen + 1
@@ -2811,6 +3115,7 @@ class Run:
             self.commands.update(struct.pack("3d", *cmd))
             self.n_commands += 1
             self.robot.set_velocity(*cmd)
+            self.pace.update(self.robot.now(), x, y, yaw, cmd)
             self.robot.step()
 
             if verbose and n % 60 == 0:
