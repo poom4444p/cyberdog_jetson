@@ -850,7 +850,16 @@ def resolve_stops(router, text, use_nlu=False, guessed=None):
 
     parse = None
     if use_nlu:
-        from cyberdog.language.infer import load_model, parse_command      # torch first, then the maps
+        # Mac only. The J4012's brain venv (go2env) has no torch, and Gemma
+        # does not fit next to VAMOS on it anyway (see place_match: nicknames):
+        # what the model was for is in the rules.
+        try:
+            from cyberdog.language.infer import load_model, parse_command  # torch first, then the maps
+        except ImportError as e:
+            raise SystemExit(f"--nlu needs torch, transformers and peft, and this machine "
+                             f"has not got them ({e.name}). The Gemma parser runs on the "
+                             f"Mac only; without --nlu the rules read places, nicknames "
+                             f"and needs.")
         load_model()
         parse = parse_command
     # No-go places are never matched by sound: they are taken only from their
@@ -3588,7 +3597,9 @@ def main():
                     help="natural-language command; multi-stop is split by rules")
     ap.add_argument("--out", default=str(paths.SCENE_CACHE / "building.mp4"))
     ap.add_argument("--no-video", action="store_true", help="drive without rendering")
-    ap.add_argument("--nlu", action="store_true", help="parse through the Gemma layer")
+    ap.add_argument("--nlu", action="store_true",
+                    help="also ask the Gemma parser, for commands no rule reads (Mac only: "
+                         "needs torch; not on the J4012, where it does not fit next to VAMOS)")
     ap.add_argument("--vamos", action=argparse.BooleanOptionalAction, default=None,
                     help="VLM in the steering loop (the default: the real robot "
                          "steers with VAMOS); --no-vamos drives the map route alone")

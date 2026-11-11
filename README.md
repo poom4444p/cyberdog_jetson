@@ -114,7 +114,15 @@ out of training, so it shows whether the model generalises rather than
 memorises.
 
 Skip this step if you only want to name places exactly as the map does
-(`restroom`, `cafeteria`, `room 201`). Everything else works without it. How
+(`restroom`, `cafeteria`, `room 201`). Everything else works without it: the
+rules read places, nicknames (`"canteen"`, `"dining hall"`) and needs
+(`"I could do with a bite"`) with no model.
+
+**Not on the J4012.** `--nlu` is a Mac (or desktop GPU) option. On the board
+the Gemma parser takes 4.7 GB of GPU memory (bf16, 15 s to load, ~4 s a
+command) and only 4.9 GB is free next to VAMOS; the aarch64 `bitsandbytes`
+wheel has no kernels for the Orin (`sm_87`), so there is no 4-bit version
+either. What it was for on the dog is in the rules instead. How
 the parser works, what it recognises and how to add places or slang:
 [`language/README.md`](src/cyberdog/language/README.md).
 

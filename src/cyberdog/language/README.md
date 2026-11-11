@@ -111,6 +111,13 @@ Everything here needs `torch` + `transformers` + `peft` + `trl` + `datasets`,
 which are not in the base Python — `pip install -e ".[language]"` adds them
 to the twin's `cyberdog_sim` environment, which is where `--nlu` runs them.
 
+Not on the J4012: the parser needs 4.7 GB of GPU memory there (bf16) and only
+4.9 GB is free next to VAMOS, and there is no 4-bit build for the Orin
+(`bitsandbytes`' aarch64 kernels are `sm_90` only). The dog runs the rules in
+`place_match.py`, which read every nickname here (held-out ones included) and
+the needs the model was taught; `run_building --nlu` without torch says so and
+stops.
+
 ```bash
 export KMP_DUPLICATE_LIB_OK=TRUE   # macOS-only libomp workaround, harmless elsewhere
 
