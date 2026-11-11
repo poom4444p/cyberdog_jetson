@@ -367,3 +367,42 @@ def test_gravity_alone_could_not_follow_the_trot():
         worst = max(worst, abs(math.degrees(math.atan(slope))))
         t += 0.1
     assert worst > 1.5
+
+
+# --- only whole sweeps (lidar.whole) ---------------------------------------------
+
+def sweep(span_s, packets=210, missing=0, n=500):
+    """A frame whose n points' times cover span_s of a sweep."""
+    t = np.linspace(0, span_s * 1e9, n).astype(np.int64)
+    pts = np.tile([3.0, 0.0, 0.0], (n, 1))
+    return Frame(pts, np.zeros(n, np.uint8), np.zeros(n, np.uint8), t, 0, 0, packets, missing)
+
+
+def test_a_whole_sweep_is_used():
+    assert L.whole(sweep(0.0995))
+    assert L.whole(sweep(0.0995, packets=205, missing=5))      # a few packets lost: still whole
+
+
+def test_a_third_of_a_sweep_is_not():
+    # HIL 11-11 14:51, dense: frames of 6048 / 7296 points covering 30-36 ms.
+    assert not L.whole(sweep(0.030))
+    assert not L.whole(sweep(L.MIN_SPAN * L.FRAME_S - 0.002))
+
+
+def test_a_sweep_that_lost_many_packets_is_not():
+    assert not L.whole(sweep(0.0995, packets=180, missing=30))
+
+
+def test_without_point_times_only_lost_packets_count():
+    assert L.whole(frame(floor_and_wall()))                     # t all zero, nothing lost
+    f = frame(floor_and_wall())
+    f.missing = 5
+    assert not L.whole(f)                                       # 5 of 6 lost
+
+
+def test_a_partial_sweep_neither_moves_the_guard_nor_reaches_the_brain():
+    li = Lidar(clock=Clock(), brain=None)
+    li.process([sweep(0.0995)], still_imu())
+    first = li.latest
+    li.process([sweep(0.030)], [])
+    assert li.latest is first and (li.used, li.partial) == (1, 1)

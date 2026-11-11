@@ -63,6 +63,16 @@ MARGIN = 0.10
 OBSTACLE_Z = (0.10, 1.00)    # above the floor
 
 STOP_M, SLOW_M = 0.30, 1.00  # free distance: no motion that way / full speed
+# A frame is used only when it is a whole sweep. A part of one sees only part
+# of what is there: the guard reads the missing sector as open floor, and the
+# brain's tracker, given a different part of the same trolley each frame, saw
+# its centroid jump and called it somebody walking ("Someone crossing from the
+# right. Waiting.", 33 s, PEOPLE=0: HIL 11-11 14:51 with the dense pattern,
+# where frames came in bursts of three, most a third of a sweep). Dropped, the
+# guard goes blind after STALE_S and stops the dog -- the safe way to fail.
+FRAME_S = 0.100              # one sweep at the driver's 10 Hz
+MIN_SPAN = 0.9               # of FRAME_S its points' times must cover
+MAX_LOST = 0.05              # of its packets it may have lost
 # Behind, the nose-down mount's lowest ray (-7 deg + 20 deg) points 13 deg up:
 # nothing lower than the sensor is ever seen there, so backing up is slow.
 REVERSE_MAX = 0.2           # m/s
@@ -238,6 +248,18 @@ def floor_height(pts, last):
     return h
 
 
+def whole(frame):
+    """Is `frame` a whole sweep? Its points span at least MIN_SPAN of FRAME_S
+    and it lost no more than MAX_LOST of its packets. Points with no spread in
+    time at all carry no sweep to judge: only the lost packets count then."""
+    t = getattr(frame, "t", None)
+    if t is not None and len(t) and t.max() > t.min():
+        if (t.max() - t.min()) / 1e9 < MIN_SPAN * FRAME_S:
+            return False
+    sent = frame.packets + frame.missing
+    return sent > 0 and frame.missing <= MAX_LOST * sent
+
+
 def _scale(free):
     return min(1.0, max(0.0, (free - STOP_M) / (SLOW_M - STOP_M)))
 
@@ -338,6 +360,7 @@ class Lidar:
         self.hold_until = -math.inf                          # clock: accelerometer ignored till
         self.seq = 0
         self.recorder = None                                 # record.LioRecorder, or None
+        self.used = self.partial = 0                         # frames: whole, and dropped (see whole)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if brain else None
         self._stop = threading.Event()
         self._thread = None
@@ -392,6 +415,10 @@ class Lidar:
         for s in samples:                # specific force at rest points up
             self.tilt.add(s, held)
         for f in frames:
+            if not whole(f):
+                self.partial += 1
+                continue
+            self.used += 1
             pts = self.level(f.xyz, getattr(f, "t", None))
             now = self.clock()
             self.latest = clearance(pts, now)

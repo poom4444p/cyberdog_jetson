@@ -82,6 +82,8 @@ finally:
         lidar.stop()
         if lidar.recorder is not None:
             lidar.recorder.close()
+        print(f"[board] Mid-360 frames: {lidar.used} used, {lidar.partial} dropped as part of a "
+              f"sweep; receiver {lidar.rx.stats() if lidar.rx is not None else '-'}")
     s = app.board.stats
     print(f"[board] stopped: ticks {s['ticks']}, sent {s['sent']}, mode {app.modes.mode}, "
           f"safety {app.board.safety.tripped or 'never tripped'}")
