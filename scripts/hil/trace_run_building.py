@@ -117,6 +117,25 @@ def free_destination(destination, xy, live, probe=None, **kw):
 
 
 rb.free_destination = free_destination
+
+# Every VAMOS answer as judged on arrival: the safety factor the dog's speed is
+# scaled by, and where the chosen path runs. A dog walking at half pace along a
+# wall for 45 s (HIL 11-11 10:36) had only these to blame, and they were not logged.
+orig_take = rb.Run.take_answer
+
+
+def take_answer(self, floor, n, pose, destination):
+    out = orig_take(self, floor, n, pose, destination)
+    if out is not None:
+        chosen, paths, safety = out
+        x, y, _ = pose
+        end = "-" if not chosen else "(%.2f,%.2f)" % tuple(chosen[-1])
+        print(f"  VAMOS t={self.robot.now():6.1f} pose ({x:.2f},{y:.2f}) safety {safety:.2f} "
+              f"candidates {len(paths)} chosen end {end}", flush=True)
+    return out
+
+
+rb.Run.take_answer = take_answer
 # main() of the module imported above, not runpy's fresh copy of it: in that
 # copy Run is another class, and the patch above would not reach it.
 sys.argv = ["run_building"] + sys.argv[1:]
