@@ -428,11 +428,12 @@ def axis_clear(info, detected_at, need=None):
     return True
 
 
-def narrow_aim(info, xy, detected_at):
-    """Where to steer through a narrow gap: onto its axis ALIGN_PRE before the
-    entrance first, then straight along it. The axis runs along the route
-    through the middle of the crossing; the entrance is where, coming back
-    from the crossing towards the dog, the room opens up."""
+def narrow_axis(info, xy, detected_at):
+    """A narrow gap's axis as the dog sees it: (centre of the crossing, axis
+    direction, the dog's metres left of the axis, metres along it from the
+    dog to the entrance). The axis runs along the route through the middle
+    of the crossing; the entrance is where, coming back from the crossing
+    towards the dog, the room opens up."""
     (px, py), (nx, ny), (ux, uy) = info["pinch"], info["normal"], info["along"]
     off = info["want"] * info["side"]
     cx, cy = px + nx * off, py + ny * off
@@ -441,10 +442,42 @@ def narrow_aim(info, xy, detected_at):
         entrance += 0.1
     lat = (xy[0] - cx) * nx + (xy[1] - cy) * ny
     to_go = (cx - xy[0]) * ux + (cy - xy[1]) * uy
-    if abs(lat) > ALIGN_TOL and to_go > entrance + 0.1:
-        pre = entrance + ALIGN_PRE
-        return (cx - ux * pre, cy - uy * pre)
-    return (cx + ux * 1.0, cy + uy * 1.0)
+    return (cx, cy), (ux, uy), lat, to_go - entrance
+
+
+def narrow_aim(info, xy, detected_at):
+    """Where to steer through a narrow gap: a point on its axis ALIGN_LOOK
+    ahead of the dog (further when the dog is far off it, so that the line
+    to it is no steeper than ALIGN_MAX_DEG -- unless that would put the point
+    beyond the entrance: the axis is to be reached by then, and a gentle line
+    from close by runs into what makes the gap narrow). Followed, the dog
+    curves onto the axis and reaches the entrance along it, not at the angle
+    it set off at -- see ALIGN_LOOK."""
+    (cx, cy), (ux, uy), lat, to_entrance = narrow_axis(info, xy, detected_at)
+    s = (xy[0] - cx) * ux + (xy[1] - cy) * uy          # the dog, along the axis
+    look = abs(lat) / math.tan(math.radians(ALIGN_MAX_DEG))
+    if to_entrance > 0.0:
+        look = min(look, to_entrance)
+    look = max(look, ALIGN_LOOK)
+    return (cx + ux * (s + look), cy + uy * (s + look))
+
+
+def leaving_narrow(last, xy):
+    """Still within NARROW_EXIT_M of where the dog last steered through a
+    narrow way (`last`, or None)?"""
+    return last is not None and math.dist(last, xy) < NARROW_EXIT_M
+
+
+def narrow_lined_up(info, xy, yaw, detected_at):
+    """False while the dog is within ALIGN_GATE of a narrow gap's entrance
+    (or in it) and not yet on its axis: more than ALIGN_TOL off it, or
+    heading more than ALIGN_YAW_DEG across it. It then walks at ALIGN_SLOW_V,
+    so the turn it is being given has the time to happen."""
+    _, (ux, uy), lat, to_entrance = narrow_axis(info, xy, detected_at)
+    if to_entrance > ALIGN_GATE:
+        return True
+    across = abs(wrap(yaw - math.atan2(uy, ux)))
+    return abs(lat) <= ALIGN_TOL and across <= math.radians(ALIGN_YAW_DEG)
 
 
 def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
@@ -480,11 +513,27 @@ NARROW_WAIT_S = 6.0       # s stood before a narrow way, while something person-
 SMALL_R = 0.30            # m, the most a person standing still measures
                           # (tracking.MIN_RADIUS is the least)
 ALIGN_TOL = 0.10          # m off a narrow gap's axis that still counts as lined up
-ALIGN_PRE = 0.5           # m before its entrance the dog lines up at. Further back
-                          # is nearer the dog when it starts close: from the main
-                          # entrance, 2.5 m from the trolley, 1.2 m made the cut
-                          # down to it -72 deg, not -33, and the route failed
-                          # (HIL 11-10 13:23; 0.5 m: 13:14, arrived)
+ALIGN_LOOK = 1.0          # m ahead along a narrow gap's axis the dog steers at.
+                          # It used to steer at a fixed point on the axis 0.5 m
+                          # before the entrance, and arrived there at the angle
+                          # it set off at: -32 deg, nose 0.31 m from the south
+                          # wall, held by the board's guard 3 s and pivoting 2 s
+                          # (HIL 11-10 13:14); 1.2 m before it made the cut -72
+                          # deg and the route failed (13:23). A point that moves
+                          # on with the dog brings it onto the axis on a curve.
+ALIGN_MAX_DEG = 35.0      # the steepest the line to that point may be: far off
+                          # the axis, the point is further ahead
+ALIGN_GATE = 0.5          # m before the entrance from which it must be lined up...
+ALIGN_YAW_DEG = 10.0      # ...within ALIGN_TOL and this of the axis' heading...
+ALIGN_SLOW_V = 0.2        # ...or it walks this slowly (m/s) until it is
+NARROW_EXIT_M = 3.0       # m walked after a narrow way on the lane point, not on
+                          # VAMOS: out of the trolley's south gap the dog is on its
+                          # axis, 0.49 m from the wall; VAMOS's paths start where
+                          # the dog is and spread +-0.25 m, all along the wall, and
+                          # their imagined runs (3.5 deg of heading error) came
+                          # within ~0.2 m of it -- safety 0.35-0.50, so 0.28-0.40
+                          # m/s, for 14 m and 45 s, never back in its lane 0.23 m
+                          # away (LANE_TOL 0.3 does not pull it in; HIL 11-11 10:36)
 AXIS_BACK, AXIS_ON = 1.0, 1.5   # m of a narrow gap's axis, before and past the
                           # crossing, that must be clear for it to count: room is
                           # judged at the pinch only, and with somebody standing
@@ -1161,6 +1210,7 @@ class Run:
         self.narrow_waited = 0         # ticks stood before a narrow way (NARROW_WAIT_S)
         self.narrow_at = -INF          # when the dog last had a narrow way ahead
         self.narrow_side = 0.0         # ...and which side it was on
+        self.narrow_last = None        # where it last steered through one (NARROW_EXIT_M)
         self.overtake_said_at = {}     # side -> when it was last said
         self.passing_lead = None       # the track being overtaken (see FOLLOW_GAP)
         self.follow_said_at = -INF     # when "Following someone ahead" was last true
@@ -2709,6 +2759,7 @@ class Run:
             # this existed. Move the goal and the model has something to solve.
             aim, offset, blocked = None, 0.0, False
             finfo, narrow_hold, narrow_go = {}, False, False   # see NARROW_ROOM
+            narrow_slow = False                                # see ALIGN_GATE
             no_way = False            # the map has a route destination and no clear aim
             # Whenever the route has a destination -- not only when the camera
             # can see it. This used to read `if state["state"] == "TRACK"`, and
@@ -2827,6 +2878,8 @@ class Run:
                     else:
                         aim = narrow_aim(finfo, (x, y), live.detected_at)
                         narrow_go = True
+                        narrow_slow = not narrow_lined_up(finfo, (x, y), yaw, live.detected_at)
+                        self.narrow_last = (x, y)
                 # One tick with no clear goal is noise -- the scan is rebuilt
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
@@ -2892,8 +2945,13 @@ class Run:
             # An overtake (follow_lead, above) steers OVERTAKE_LAT left of the
             # lane point; VAMOS, which would hold the dog in its lane, waits
             # until it is back.
+            # Out of a narrow way, back to the lane before VAMOS steers again:
+            # see NARROW_EXIT_M.
+            if self.narrow_last is not None and not leaving_narrow(self.narrow_last, (x, y)):
+                self.narrow_last = None
             on_vamos = (len(rest) >= 2 and state["state"] == "TRACK" and not offset
                         and not pass_shift
+                        and not leaving_narrow(self.narrow_last, (x, y))
                         and not self.door_near(gates, (x, y), DOOR_MAP_D))
             if on_vamos:
                 tx, ty = path_target(rest, (x, y))
@@ -3088,7 +3146,8 @@ class Run:
             if narrow_hold:
                 speed = 0.0                       # before a narrow way: see NARROW_WAIT_S
             elif narrow_go:
-                speed = min(speed, PASS_V)        # through it, lined up
+                # through it, lined up; slowly while not yet (ALIGN_GATE)
+                speed = min(speed, ALIGN_SLOW_V if narrow_slow else PASS_V)
             turn_only = DOOR_ERR if at_door else TURN_ONLY
             cmd = (0.0 if abs(err) > turn_only else speed * math.cos(err), 0.0, K_W * err)
             if cmd[0] > 0.0 and self.nose_closing(live, (x, y, yaw), cmd):
