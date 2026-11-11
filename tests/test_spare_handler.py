@@ -11,7 +11,7 @@ DT = 0.05
 def stub(pinned=True):
     """A run whose every roll-forward puts the person into the wall (pinned),
     or leaves them plenty of room."""
-    run = types.SimpleNamespace(robot=types.SimpleNamespace(CONTROL_DT=DT), turn_held=0, obs={"eased": 0})
+    run = types.SimpleNamespace(robot=types.SimpleNamespace(CONTROL_DT=DT), turn_held=0, side_held=0.0, obs={"eased": 0})
     run.room = 0.05 if pinned else 0.6
     run.handler_room = lambda live, x, y, yaw, walls_only=False: 0.10 if pinned else 0.6
     run.swing = lambda live, pose, cmd, people=(), dt=0.1, need=rb.ROBOT_R, ahead=0.0: (
@@ -78,7 +78,7 @@ class Corridor:
 
 
 def real(end=True):
-    run = types.SimpleNamespace(robot=types.SimpleNamespace(CONTROL_DT=DT), turn_held=0, obs={"eased": 0})
+    run = types.SimpleNamespace(robot=types.SimpleNamespace(CONTROL_DT=DT), turn_held=0, side_held=0.0, obs={"eased": 0})
     for name in ("handler_room", "swing", "spare_handler"):
         setattr(run, name, getattr(rb.Run, name).__get__(run))
     return run, Corridor(end)
@@ -98,3 +98,52 @@ def test_with_room_ahead_easing_still_walks_on():
     run, live = real(end=False)
     vx, vy, w = run.spare_handler(live, AT_THE_CORNER, PIVOT, limit=0.3)
     assert vx == rb.SWING_V and w < PIVOT[2], (vx, vy, w)
+
+
+def sidestep_only(cmd):
+    """A run where `cmd` would put the person into something, walking forward
+    in any form is not clear, and a step either way is: the dog's nose in the
+    cafeteria door's east jamb (selftest, t 22-300 s)."""
+    run = types.SimpleNamespace(robot=types.SimpleNamespace(CONTROL_DT=DT), turn_held=0,
+                                side_held=0.0, obs={"eased": 0}, cmd=cmd)
+    run.handler_room = lambda live, x, y, yaw, walls_only=False: 0.6
+
+    def swing(live, pose, c, people=(), dt=0.1, need=rb.ROBOT_R, ahead=0.0):
+        if c[1] != 0.0:
+            return 0.6, True, 0.6, 0.5                  # a step sideways: fine
+        if c == run.cmd:
+            return 0.0, True, 0.6, 0.5                  # as commanded: into it
+        return 0.6, False, 0.6, 0.1                     # walking on: nose in the jamb
+    run.swing = swing
+    run.spare_handler = rb.Run.spare_handler.__get__(run)
+    return run
+
+
+def step(run, w):
+    run.cmd = (0.8, 0.0, w)
+    return run.spare_handler(None, (33.84, 11.17, 2.14), run.cmd, limit=0.8)
+
+
+def test_a_turn_picks_the_side_of_the_sidestep():
+    assert step(sidestep_only((0.8, 0.0, -0.25)), -0.25)[1] == -rb.SIDE_V
+
+
+def test_a_turn_rate_near_zero_keeps_the_side_already_stepped_to():
+    # Selftest cafeteria: w +-0.01 flipping sign every tick stepped the dog
+    # -0.2, +0.2, -0.2 m/s on the spot for 278 s.
+    run = sidestep_only((0.8, 0.0, -0.25))
+    step(run, -0.25)
+    sides = [step(run, w)[1] for w in (0.01, -0.01, 0.02, -0.005, 0.01)]
+    assert sides == [-rb.SIDE_V] * 5, sides
+
+
+def test_a_turn_rate_near_zero_with_no_side_held_does_not_sidestep():
+    run = sidestep_only((0.8, 0.0, 0.01))
+    assert step(run, 0.01)[1] == 0.0 and run.side_held == 0.0
+
+
+def test_the_held_side_is_let_go_once_the_command_is_fine():
+    run = sidestep_only((0.8, 0.0, -0.25))
+    step(run, -0.25)
+    run.swing = lambda live, pose, c, people=(), dt=0.1, need=rb.ROBOT_R, ahead=0.0: (0.6, True, 0.6, 0.5)
+    assert step(run, 0.01) == (0.8, 0.0, 0.01) and run.side_held == 0.0

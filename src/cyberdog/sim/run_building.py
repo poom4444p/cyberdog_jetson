@@ -207,6 +207,18 @@ def lane_point(xy, waypoints, i, look=None):
     return tuple(waypoints[-1])
 
 
+def route_offset(xy, waypoints, i):
+    """How far the dog is from the rest of its route: the least distance to
+    any segment from waypoints[i-1] on."""
+    best = math.dist(xy, waypoints[i])
+    for a, b in zip(waypoints[max(i - 1, 0):], waypoints[max(i - 1, 0) + 1:]):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        seg = dx * dx + dy * dy
+        t = 0.0 if seg < 1e-12 else min(max(((xy[0] - a[0]) * dx + (xy[1] - a[1]) * dy) / seg, 0.0), 1.0)
+        best = min(best, math.hypot(a[0] + t * dx - xy[0], a[1] + t * dy - xy[1]))
+    return best
+
+
 def in_lane(pt, a, b, tol=None):
     """`pt` moved across the line a -> b to within `tol` of it."""
     dx, dy = b[0] - a[0], b[1] - a[1]
@@ -705,6 +717,8 @@ HANDLER_ROOM = 0.35       # metres, their centre to a surface: HANDLER_R + 0.10
 SWING_T = 0.8             # seconds a command is rolled forward over
 SWING_V = 0.30            # m/s walked while easing a turn a pivot would have made
 SWING_EASE = (0.5, 0.25, 0.0)   # fractions of the turn rate tried, in order
+SIDE_MIN_W = 0.05         # rad/s: a turn rate below this does not pick the side
+                          # of a sidestep (see spare_handler)
 SIDE_V = 0.20             # m/s sideways, towards the turn, when no eased turn
                           # walking forward is clear. Setting off round somebody
                           # who stopped in its lane, the dog had them in front and
@@ -776,6 +790,13 @@ FUNNEL_PRE = 0.5          # beyond it, the point is this far before the doorway.
                           # put its nose into the door's west jamb -- the board's
                           # guard held it there 30 s (HIL 11-09 13:25, 13:42).
                           # Lined up in the corridor first, it walks in square.
+FUNNEL_OFF = 0.5          # ...but only when the dog is more than this off its
+                          # route, as it was there. On it, the route's own rounded
+                          # corner (lane.round_corners) is the way in: lined up
+                          # instead, the dog walked the corridor to 0.5 m before
+                          # the electrical engineering lab's door, then pivoted
+                          # there and swung its user onto the floor-2 crate
+                          # (selftest, 0.7 s, from #4).
 DOOR_MAP_D = 4.0          # metres from a doorway on the route inside which the
                           # map's route steers, not a VAMOS path. The route
                           # starts crossing the corridor for a door about this
@@ -1176,6 +1197,7 @@ class Run:
         self.dog_geoms, self.touchable = self.body_contacts()
         self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
         self.turn_held = 0        # ticks spare_handler has held a turn (HOLD_TURN_S)
+        self.side_held = 0.0      # side spare_handler is stepping to (SIDE_MIN_W), +1 left
         # The affordance network watching, not steering (--affordance-shadow):
         # what it would say about the walk ahead, against what was really
         # there. `affordance_shadow` is the log file; None is off.
@@ -1794,49 +1816,69 @@ class Run:
 
     @staticmethod
     def door_near(gates, xy, reach):
-        """Is a doorway on the route, not yet walked through, within `reach`?"""
+        """Is a doorway on the route, not yet walked through, within `reach`?
+
+        Any of them, not only the first one not yet walked through: see
+        door_ahead for why the first is not always the one ahead."""
         for entry, exit_, (ux, uy) in gates:
             depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
             if (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy > depth + FUNNEL_PAST:
                 continue                          # through this one already
-            return math.dist(xy, entry) < reach
+            if math.dist(xy, entry) < reach:
+                return True
         return False
+
+    @staticmethod
+    def door_ahead(gates, xy):
+        """(entry, exit, axis, s, depth, lateral) of the doorway the dog is
+        within a funnel's reach of -- FUNNEL_D before it and FUNNEL_D either
+        side of its axis -- and not yet through; None when there is none.
+
+        Every gate is looked at, not only the first one not yet walked
+        through. "Through" is measured along a gate's own axis, and a gate
+        with a slanted axis that is behind the dog stops reading as walked
+        through once the dog is far enough to its side: the floor-1 lift
+        doorway's (0.24, 0.97) from 11 m west, on the way to the cafeteria.
+        Stopping at that one turned the funnel off for the rest of the leg;
+        the dog cut the corner into the cafeteria door's east jamb at
+        (33.8, 11.2) and stood there pressed into it until the leg timed out
+        (selftest, from #6's lane point)."""
+        for entry, exit_, (ux, uy) in gates:
+            s = (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy
+            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
+            if s > depth + FUNNEL_PAST:
+                continue                          # through this one already
+            # Not a door the dog is walking past on its way somewhere else:
+            # only when it is within a funnel's width of the axis.
+            lateral = (xy[0] - entry[0]) * -uy + (xy[1] - entry[1]) * ux
+            if s < -FUNNEL_D or abs(lateral) > FUNNEL_D:
+                continue                          # not there yet, or not this one
+            return entry, exit_, (ux, uy), s, depth, lateral
+        return None
 
     @staticmethod
     def door_through(gates, xy):
         """The point FUNNEL_PAST beyond the far side of the doorway the funnel
         is steering the dog into (see funnel), or None when it is not."""
-        for entry, exit_, (ux, uy) in gates:
-            s = (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy
-            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
-            if s > depth + FUNNEL_PAST:
-                continue
-            if s < -FUNNEL_D or abs((xy[0] - entry[0]) * -uy + (xy[1] - entry[1]) * ux) > FUNNEL_D:
-                return None
-            return (exit_[0] + ux * FUNNEL_PAST, exit_[1] + uy * FUNNEL_PAST)
-        return None
+        door = Run.door_ahead(gates, xy)
+        if door is None:
+            return None
+        _, exit_, (ux, uy), _, _, _ = door
+        return (exit_[0] + ux * FUNNEL_PAST, exit_[1] + uy * FUNNEL_PAST)
 
     @staticmethod
-    def funnel(gates, xy, target):
+    def funnel(gates, xy, target, off_route=True):
         """(`target`, or a point on the axis of the doorway just ahead; whether
-        the dog is within DOOR_NEAR of that doorway). See FUNNEL_D."""
-        for entry, exit_, (ux, uy) in gates:
-            s = (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy
-            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
-            if s > depth + FUNNEL_PAST:
-                continue                          # through this one already
-            if s < -FUNNEL_D:
-                break                             # not there yet
-            # Not a door the dog is walking past on its way somewhere else:
-            # only when it is within a funnel's width of the axis.
-            lateral = (xy[0] - entry[0]) * -uy + (xy[1] - entry[1]) * ux
-            if abs(lateral) > FUNNEL_D:
-                break
-            ahead = min(s + FUNNEL_LEAD, depth + FUNNEL_PAST)
-            if abs(lateral) > (ahead - s) * math.tan(FUNNEL_ANGLE):
-                ahead = min(ahead, -FUNNEL_PRE)          # line up before the frame
-            return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
-        return target, False
+        the dog is within DOOR_NEAR of that doorway). See FUNNEL_D. Lines up
+        before the frame only `off_route` (see FUNNEL_OFF)."""
+        door = Run.door_ahead(gates, xy)
+        if door is None:
+            return target, False
+        entry, _, (ux, uy), s, depth, lateral = door
+        ahead = min(s + FUNNEL_LEAD, depth + FUNNEL_PAST)
+        if off_route and abs(lateral) > (ahead - s) * math.tan(FUNNEL_ANGLE):
+            ahead = min(ahead, -FUNNEL_PRE)              # line up before the frame
+        return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
 
     def handler_room(self, live, x, y, yaw, walls_only=False):
         """What the dog can know of the room around the person, for a dog pose:
@@ -1962,6 +2004,7 @@ class Run:
         worst, _, walls, body = self.swing(live, pose, cmd)
         if ok(worst, walls):
             self.turn_held = 0
+            self.side_held = 0.0
             return cmd
         vx, vy, w = cmd
         v = max(vx, min(SWING_V, limit))
@@ -1990,10 +2033,18 @@ class Run:
                 break
             if best is None or rank(room, aw) > best[0]:
                 best = (rank(room, aw), alt)
-        if (best is None or best[0] < rank(min(HANDLER_ROOM, now), wall_now)) and w != 0.0:
+        # Which way a sidestep goes: towards the turn -- but a turn rate this
+        # small says nothing about which way, and it flipped sign tick to tick
+        # with the dog's nose in a door's jamb, so the dog stepped left, right,
+        # left... on the spot until the leg timed out (cafeteria, 278 s). Below
+        # SIDE_MIN_W the side already being stepped to is kept; with none, no
+        # sidestep.
+        side = (math.copysign(1.0, w) if abs(w) >= SIDE_MIN_W
+                else self.side_held)
+        if (best is None or best[0] < rank(min(HANDLER_ROOM, now), wall_now)) and side:
             # Nothing walking forward will do: step sideways. See SIDE_V.
             for f in SWING_EASE:
-                alt = (0.0, math.copysign(SIDE_V, w), w * f)
+                alt = (0.0, side * SIDE_V, w * f)
                 room, clear, aw, _ = self.swing(live, pose, alt, people, need=need)
                 if not clear:
                     continue
@@ -2019,8 +2070,10 @@ class Run:
         # out of the floor-3 lift with its user against the car and the wall,
         # the dog turned 0.04 rad every 3 s and stood there for 215 s.
         if best is None or best[0] <= rank(worst, walls):
+            self.side_held = 0.0
             return cmd
         self.obs["eased"] += 1
+        self.side_held = math.copysign(1.0, best[1][1]) if best[1][1] else 0.0
         return best[1]
 
     def score_handler(self, floor):
@@ -2971,7 +3024,8 @@ class Run:
                     tx, ty = tx - uy * pass_shift, ty + ux * pass_shift
             at_door = False
             if not offset:
-                (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty))
+                (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty),
+                                                off_route=route_offset((x, y), waypoints, i) > FUNNEL_OFF)
             if asked and self.shadow:
                 self.log_shadow(floor, n, (x, y, yaw), (tx, ty), proposed, safety)
             if self.aff is not None and n % AFF_EVERY == 0:
