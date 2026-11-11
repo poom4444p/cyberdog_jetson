@@ -30,6 +30,8 @@
 #                                   $CYBERDOG/output/tracks.jsonl (--track-log)
 #   CLOUD_LOG=1                     brain saves its scans to
 #                                   $CYBERDOG/output/clouds.npz (--cloud-log)
+#   LIO_RECORD=DIR                  board: save the raw Mid-360 frames, its IMU and
+#                                   the bus pose to DIR (board_main --record)
 set -u
 
 CYBERDOG=${CYBERDOG:-$HOME/cyberdog_jetson}
@@ -78,6 +80,7 @@ case "${1:-}" in
     fi
     stale=()
     [ -n "$STALE_MS" ] && stale=(--stale-ms "$STALE_MS")
+    [ -n "$LIO_RECORD" ] && stale+=(--record "$LIO_RECORD")
     rm -f "$BOARD_LOG"
     (cd "$GO2_BOARD" || exit 1; . "$GO2ENV/bin/activate"
      nohup taskset -c "$BOARD_CORES" python -u scripts/board_main.py --iface "$IFACE" \

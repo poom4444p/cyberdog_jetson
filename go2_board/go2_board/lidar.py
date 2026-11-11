@@ -337,6 +337,7 @@ class Lidar:
         self.cmd_ref = None                                  # (vx, vy) at the last change
         self.hold_until = -math.inf                          # clock: accelerometer ignored till
         self.seq = 0
+        self.recorder = None                                 # record.LioRecorder, or None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if brain else None
         self._stop = threading.Event()
         self._thread = None
@@ -383,6 +384,10 @@ class Lidar:
             self.cmd_ref = (vx, vy)
 
     def process(self, frames, samples):
+        if self.recorder is not None:                        # raw, before anything is done to it
+            now = self.clock()
+            self.recorder.imu(samples, now)
+            self.recorder.frames(frames, now)
         held = self.clock() < self.hold_until
         for s in samples:                # specific force at rest points up
             self.tilt.add(s, held)
