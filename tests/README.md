@@ -11,7 +11,7 @@ conda activate cyberdog_sim
 | What | Command | Time | Needs |
 |---|---|---|---|
 | Unit tests | `pytest` | ~5 s | nothing |
-| Self-test, every stage | `python tests/selftest.py` | ~1.5 min | the building scene |
+| Self-test, every stage | `python tests/selftest.py` | ~2.5 min | the building scene |
 | Self-test, one stage | `python tests/selftest.py lidar` | 1–40 s | the building scene |
 | Location check | `python tests/test_locations.py` | ~2 s | nothing |
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
@@ -112,6 +112,7 @@ every stage above it.
 | `affordance` | The affordance network (needs `models/affordance/mlp.pt`) walked up to every crate on the map with real scans: no walk into a box is passed, and a wall the map knows does not make it refuse. Reports, without failing, walks whose body only touches at the end and clear walks beside a box that it refuses | ~6 s |
 | `handle` | The person on the handle overrules the dog: a tug stops it where it stands until continue (walking and boarding the lift), with no continue the run ends there, the lift waits at its doors for a continue of its own, and an idle handle changes no command | ~5 s |
 | `run` | The whole stack on 8 routes across all 3 floors, plus `room 201` with three people twice: as `run_building` runs by default (aware crowd, CE-RRT\*) and as the stress test (`--crowd oblivious --planner map`). Each must arrive with no collision, no pedestrian contact, and **no contact for the person on the handle** | ~45 s |
+| `run-board` | `run`'s routes again on `--robot twin-board`: the twin turning as go2_board walks the dog (late, short, a pivot about a fifth of what it asks; fitted from HIL logs) and stopped by the board's own LiDAR guard, at the policy's own clock (1.0). Same checks | ~45 s |
 
 The `vamos` stage runs its own stand-in server. It needs neither the real
 VLM server nor `vamos_mac`.

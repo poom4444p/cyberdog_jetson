@@ -244,7 +244,7 @@ open a new one or switch back first.
 
 ```bash
 conda activate cyberdog_sim
-python tests/selftest.py          # every stage of the stack, ~2 min
+python tests/selftest.py          # every stage of the stack, ~2.5 min
 python tests/selftest.py lidar    # or just one stage
 pytest                            # unit tests
 ```
