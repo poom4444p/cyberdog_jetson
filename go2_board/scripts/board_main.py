@@ -36,6 +36,10 @@ def main():
     ap.add_argument("--lidar-in-process", action="store_true",
                     help="run the Mid-360 as a thread in this process (the old way), not its "
                          "own process (go2_board.lidar_proc): only for a light test stream")
+    ap.add_argument("--pose", choices=["sim", "lio"], default="sim",
+                    help="the pose reported to the brain: the bus's (go2_world's ground truth "
+                         "in HIL), or the Mid-360's own odometry (go2_board.odometry, needs "
+                         "small_gicp), anchored to the bus at the start and after a floor change")
     ap.add_argument("--record", default=None, metavar="DIR",
                     help="save the raw Mid-360 frames, its IMU and the bus's pose to DIR "
                          "(go2_board.record: a dataset to test a LIO against)")
@@ -50,6 +54,8 @@ def main():
     ap.add_argument("--brain", default=HOST,
                     help="where the brain listens for state and clouds (default %(default)s)")
     args = ap.parse_args()
+    if args.pose == "lio" and (args.no_lidar or args.lidar_in_process):
+        ap.error("--pose lio needs the Mid-360 in its own process (no --no-lidar, --lidar-in-process)")
     if args.listen in ("0.0.0.0", ""):
         ap.error("--listen 0.0.0.0 would take commands from every network the board is on")
 
@@ -77,8 +83,13 @@ def main():
     else:
         # Its own process: the motor loop never waits on the LiDAR (lidar_proc).
         from go2_board.lidar_proc import LidarProcess
-        lidar = LidarProcess(brain=(args.brain, BRAIN_CLOUD_PORT), record=args.record, meta=meta).start()
+        lidar = LidarProcess(brain=(args.brain, BRAIN_CLOUD_PORT), record=args.record, meta=meta,
+                             odometry=args.pose == "lio").start()
         rcvbuf, short = lidar.rcvbuf, lidar.rcvbuf_short
+        if args.pose == "lio" and not lidar.odometry_available:
+            lidar.stop()
+            sys.exit("[board] --pose lio: small_gicp is not installed in this Python "
+                     "(go2_board.odometry); install its wheel, or run --pose sim")
     if lidar is not None:
         where = "in this process" if args.lidar_in_process else f"own process, pid {lidar.proc.pid}"
         print(f"[board] Mid-360 ({where}): receive buffer {rcvbuf / 2**20:.1f} MB")
@@ -94,7 +105,12 @@ def main():
               "for a simulator only, never on the dog")
     board = Board(bus, stale_s=stale_s)
     link = BoardLink(clock=board.clock, listen=args.listen, brain_host=args.brain)
-    app = App(bus, link=link, lidar=lidar, walker=walker, board=board)
+    anchor = None
+    if args.pose == "lio":
+        from go2_board.odometry import PoseAnchor
+        anchor = PoseAnchor()
+        print("[board] pose: the Mid-360's odometry (small_gicp + gyro), anchored to the bus pose")
+    app = App(bus, link=link, lidar=lidar, walker=walker, board=board, anchor=anchor)
     print(f"[board] up, LIMP; waiting for the brain on udp {args.listen}:9870, state to "
           f"{args.brain}:{BRAIN_PORT}"
           + ("" if lidar is None else f"; Mid-360 on udp 56301, clouds to {args.brain}:{BRAIN_CLOUD_PORT}"))
@@ -116,6 +132,10 @@ def main():
                 final = lidar.stop() or {}
             print(f"[board] Mid-360 frames: {final.get('used')} used, {final.get('partial')} "
                   f"dropped as part of a sweep; receiver {final.get('receiver')}")
+            if anchor is not None:
+                ms = final.get("odometry_ms")
+                print(f"[board] odometry: {final.get('odometry_sweeps')} sweeps, "
+                      f"{'-' if ms is None else f'{ms:.1f}'} ms a sweep; {anchor.summary()}")
         s = app.board.stats
         print(f"[board] stopped: ticks {s['ticks']}, sent {s['sent']}, mode {app.modes.mode}, "
               f"safety {app.board.safety.tripped or 'never tripped'}")

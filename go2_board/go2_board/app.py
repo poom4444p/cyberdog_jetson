@@ -28,9 +28,12 @@ def yaw(quat):
 
 
 class App:
-    def __init__(self, bus, link=None, walker=None, board=None, lidar=None):
+    def __init__(self, bus, link=None, walker=None, board=None, lidar=None, anchor=None):
+        """`anchor`: an odometry.PoseAnchor to report the LiDAR odometry's pose
+        (lidar.odometry()) instead of the bus's; None reports the bus's."""
         self.bus = bus
         self.lidar = lidar
+        self.anchor = anchor
         self.board = board or Board(bus)
         self.link = link or BoardLink(clock=self.board.clock)
         self.modes = Modes(walker)
@@ -70,12 +73,21 @@ class App:
         if s is not None and hasattr(self.lidar, "truth"):   # the truth a LIO is judged by
             self.lidar.truth(self.board.clock(), s.pos, s.quat)
         pos = s.pos if s is not None and s.pos is not None else (None, None, None)
+        x, y = pos[0], pos[1]
+        th = None if s is None else yaw(s.quat)
+        if self.anchor is not None:
+            # The LiDAR's own idea of where the dog is (odometry.py); the bus's
+            # only anchors it, and the height (the floor) stays the bus's.
+            bus = None if pos[0] is None or th is None else (pos[0], pos[1], pos[2], th)
+            o = self.lidar.odometry() if self.lidar is not None else None
+            placed = None if o is None else self.anchor.place(o[:3], bus, self.board.clock())
+            x, y, th = (None, None, None) if placed is None else placed
         self.link.send_state(
             t=self.board.clock(),
-            x=None if pos[0] is None else float(pos[0]),
-            y=None if pos[1] is None else float(pos[1]),
+            x=None if x is None else float(x),
+            y=None if y is None else float(y),
             z=None if pos[2] is None else float(pos[2]),
-            yaw=None if s is None else yaw(s.quat),
+            yaw=None if th is None else float(th),
             mode=self.modes.mode, tripped=self.board.safety.tripped,
             walker=self.modes.walker is not None,
             lidar=self._lidar_state())
