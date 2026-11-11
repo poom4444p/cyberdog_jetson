@@ -72,3 +72,12 @@ def test_a_dropped_answer_still_holds_the_worker():
     run.vlm_worker.result(timeout=1.0)
     assert not run.vlm_busy()
     run.vlm_pool.shutdown()
+
+
+def test_vlm_latency_option_takes_seconds_or_measured():
+    # The twin's default is the dog's latency, not the call's own wall-clock
+    # time: from the Mac over the tunnel that was ~4.7 s and 19 of 25 paths
+    # arrived already behind the dog (cafeteria, twin + VAMOS).
+    assert rb.vlm_latency_arg("1.8") == 1.8
+    assert rb.vlm_latency_arg("measured") is None
+    assert 2.5 <= rb.VLM_LATENCY <= 3.2                  # HIL 11-11: 2.7-3.2 s
