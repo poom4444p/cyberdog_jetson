@@ -80,7 +80,7 @@ case "${1:-}" in
     fi
     stale=()
     [ -n "$STALE_MS" ] && stale=(--stale-ms "$STALE_MS")
-    [ -n "$LIO_RECORD" ] && stale+=(--record "$LIO_RECORD")
+    [ -n "${LIO_RECORD:-}" ] && stale+=(--record "$LIO_RECORD")   # :- for set -u: unset is no recording
     rm -f "$BOARD_LOG"
     (cd "$GO2_BOARD" || exit 1; . "$GO2ENV/bin/activate"
      nohup taskset -c "$BOARD_CORES" python -u scripts/board_main.py --iface "$IFACE" \

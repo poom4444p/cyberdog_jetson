@@ -79,6 +79,21 @@ changes `pyproject.toml`, run the install line again.
 board's own `~/mujoco_menagerie`, so it is built there, not copied from the
 Mac. Rebuild it after moving the menagerie or changing the building.
 
+The Mid-360's receive buffer: a real unit (or `LIDAR_ARGS=--dense`) sends
+~300 KB a frame, ten frames a second, and Linux caps a socket's receive
+buffer at `net.core.rmem_max`, 212,992 bytes out of the box, without a word.
+Left there, the board lost 12 % of the packets in a dense route and half its
+frames arrived partial (HIL 11-11 15:39). Once, with sudo:
+
+```bash
+echo net.core.rmem_max=16777216 | sudo tee /etc/sysctl.d/90-livox.conf
+sudo sysctl --system | grep rmem_max      # net.core.rmem_max = 16777216
+```
+
+The file keeps it across boots. `board_main` asks for 8 MB
+(`go2_board.livox.RCVBUF`), prints what it got (`[board] Mid-360 receive
+buffer 8.0 MB`) and warns, with this fix, when the kernel gave less.
+
 Then `run_hil.sh clock`, `walk` and `route`, as below. To switch the board off:
 `ssh -t jittarin@192.168.55.1 'sudo shutdown -h now'`, and wait for it to go dark.
 
