@@ -101,11 +101,15 @@ class Track:
         self.past.append((x, y))
         self.age += 1
         self.missed = 0
+        self.measure()
+        self.walked = self.walked or self.moving
+
+    def measure(self):
+        """Velocity across the window: where it is against where it was."""
         if len(self.past) > 1:
-            ox, oy = self.past[0]
+            (ox, oy), (x, y) = self.past[0], self.past[-1]
             span = (len(self.past) - 1) * self.dt
             self.vx, self.vy = (x - ox) / span, (y - oy) / span
-        self.walked = self.walked or self.moving
 
     @property
     def speed(self):
@@ -217,8 +221,23 @@ class Tracker:
                 # Coasted, and the coasted position goes into the history too
                 # -- otherwise the window holds a gap and the velocity across
                 # it is measured over the wrong amount of time.
-                t.x, t.y = t.predict(self.dt)
+                #
+                # Only a track that has walked coasts along its velocity. One
+                # that has not is held where it was last seen: its velocity
+                # is from a few ticks of a centroid settling on a half-seen
+                # thing, and carried forward it fills the window with points
+                # nobody observed, which then "prove" it moving. HIL 11-11
+                # 09:45, PEOPLE=0: a server-room cluster seen 3 ticks, coasted
+                # 6 at 0.9 m/s, called moving -> "Someone crossing from the
+                # left". Same at the floor-1 lift (10:27). Held in place, a
+                # real walker still reads its true pace once seen again --
+                # the window measures where it is against where it was.
+                if t.walked:
+                    t.x, t.y = t.predict(self.dt)
                 t.past.append((t.x, t.y))
+                # ...and the velocity is re-measured over it, or `moving`
+                # would judge a held track on the speed it had when last seen.
+                t.measure()
                 self.tracks.append(t)
         return self.tracks
 
