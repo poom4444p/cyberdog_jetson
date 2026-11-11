@@ -10,8 +10,9 @@ command and a few seconds.
     python tests/selftest.py lidar      # just one
 
 Stages run bottom-up: scene, lidar, perception, destination, crowd, latency,
-dreaming, vamos, run. The first failure is usually the real one -- a bad scene fails
-everything above it.
+dreaming, vamos, handle, affordance, run, run-board (run's routes on the twin
+walked as go2_board walks the dog). The first failure is usually the real
+one -- a bad scene fails everything above it.
 """
 import math
 import os
@@ -827,6 +828,22 @@ def run():
     Scored on ground truth the robot is never shown: MuJoCo's contacts between
     the dog's body and the scene, and distance to the pedestrians.
     """
+    _routes()
+
+
+def run_board():
+    """`run`'s routes again, the twin walked as go2_board walks the dog
+    (`--robot twin-board`, robot/board_model_robot.py): turns late and short,
+    a pivot about a fifth of what it asks, and the board's LiDAR guard, which
+    run_building then meets as it does on the board (respect_board). At the
+    policy's own clock (1.0), as a real Go2 would walk -- not the HIL rig's
+    0.83. The plain twin turns as told at once and nothing stops it, which is
+    why its routes came out cleaner than HIL's."""
+    _routes(["--robot", "twin-board"], " [twin-board]")
+
+
+def _routes(robot=(), tag=""):
+    """run / run-board: every route, `robot` added to run_building's arguments."""
     import subprocess
     py = sys.executable
     # (destination, expected outcome, extra args). The outcome is what this
@@ -878,13 +895,13 @@ def run():
     for dest, expect, extra in cases:
         out = subprocess.run(
             [py, "-m", "cyberdog.sim.run_building", dest,
-             "--auto-confirm", "--no-video", "--no-vamos"] + extra,
+             "--auto-confirm", "--no-video", "--no-vamos"] + extra + list(robot),
             capture_output=True, text=True).stdout
         arrived = "ARRIVED" in out
         hit = "COLLISIONS:" in out or "CONTACT:" in out
         got = "collides" if hit else "arrives" if arrived else "stops short"
         label = dest + (" (with people, stress test)" if "--crowd" in extra
-                        else " (with people)" if extra else "")
+                        else " (with people)" if extra else "") + tag
         if expect != "arrives":
             label += f" (known limit: {expect})"
         check(f"route: {label}", got == expect,
@@ -1100,7 +1117,7 @@ def affordance():
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,
           "destination": destination, "crowd": crowd, "latency": latency,
           "dreaming": dreaming, "vamos": vamos, "handle": handle,
-          "affordance": affordance, "run": run}
+          "affordance": affordance, "run": run, "run-board": run_board}
 
 
 if __name__ == "__main__":
