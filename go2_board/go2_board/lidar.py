@@ -368,6 +368,11 @@ class Lidar:
     def clearance(self):
         return self.latest
 
+    def truth(self, t, pos, quat):
+        """The bus pose, for a recording (record.LioRecorder); nothing without one."""
+        if self.recorder is not None:
+            self.recorder.truth(t, pos, quat)
+
     @property
     def up(self):
         return self.tilt.up
