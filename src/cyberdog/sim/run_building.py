@@ -1498,8 +1498,9 @@ class Run:
         real thread would land its answer on a different tick every time. On
         the robot this is a worker thread; the timing is the same.
 
-        The wall-clock time the HTTP call really took is the default latency:
+        `vlm_latency` None is the wall-clock time the HTTP call really took:
         the sim is paused while it runs, then charged for it afterwards.
+        run_building's own default is VLM_LATENCY, the dog's.
         """
         if self.real_time:
             # Frame and lens pose now, on this thread (the renderer's); only
@@ -3567,6 +3568,20 @@ class Run:
         self.stair_flights += len(flights)
 
 
+# Seconds a VAMOS answer takes to come back on the dog: asked to answered on
+# the J4012, VAMOS on its GPU (HIL 11-11: 2.7, 3.2, 2.9 s mean per route). The
+# twin's default, in sim time. Not the call's own wall-clock time: from the Mac
+# that goes through the tunnel and the USB link, ~4.7 s, and in that the dog
+# walked 3.3 m -- past where every path VAMOS drew (1.2-4 m ahead) began, so
+# 19 of 25 were rejected as already behind it (cafeteria, twin + VAMOS).
+VLM_LATENCY = 2.8
+
+
+def vlm_latency_arg(text):
+    """--vlm-latency: seconds, or 'measured' (None: the call's wall-clock time)."""
+    return None if text == "measured" else float(text)
+
+
 def main():
     ap = argparse.ArgumentParser(description="CyberDog whole-building simulation")
     ap.add_argument("command", nargs="?", default="take me to the server room",
@@ -3584,10 +3599,11 @@ def main():
                     metavar="PATH", help="where --shadow writes one JSON line per VAMOS call")
     ap.add_argument("--vamos-url", default=None, metavar="URL",
                     help="VAMOS server (default http://127.0.0.1:8009)")
-    ap.add_argument("--vlm-latency", type=float, default=None, metavar="S",
+    ap.add_argument("--vlm-latency", type=vlm_latency_arg, default=VLM_LATENCY, metavar="S",
                     help="with --vamos or --shadow: seconds of sim time before a VAMOS "
-                         "answer arrives; the control loop runs on meanwhile (default: "
-                         "the call's measured time; fix it for repeatable runs)")
+                         "answer arrives; the control loop runs on meanwhile (default "
+                         f"{VLM_LATENCY}: the J4012's, see VLM_LATENCY; 'measured': the "
+                         "call's own wall-clock time)")
     ap.add_argument("--vamos-sample", action="store_true",
                     help="with --vamos or --shadow: let VAMOS sample its paths "
                          "(temperature 1.0, different every run) instead of beam "
