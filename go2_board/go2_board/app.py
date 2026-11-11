@@ -67,9 +67,8 @@ class App:
 
     def report(self):
         s = self.bus.read()
-        rec = getattr(self.lidar, "recorder", None)
-        if rec is not None and s is not None:                # the truth a LIO is judged by
-            rec.truth(self.board.clock(), s.pos, s.quat)
+        if s is not None and hasattr(self.lidar, "truth"):   # the truth a LIO is judged by
+            self.lidar.truth(self.board.clock(), s.pos, s.quat)
         pos = s.pos if s is not None and s.pos is not None else (None, None, None)
         self.link.send_state(
             t=self.board.clock(),

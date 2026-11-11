@@ -84,14 +84,10 @@ def test_app_records_the_bus_pose_with_each_state_report(tmp_path):
     from test_app import app
     a, inbox, clock = app()
 
-    class WithRecorder:
-        recorder = LioRecorder(str(tmp_path), clock=clock)
-
-        def clearance(self):
-            return None
-
-    a.lidar = WithRecorder()
+    li = Lidar(clock=clock, brain=None)                    # in-process; LidarProcess the same
+    li.recorder = LioRecorder(str(tmp_path), clock=clock)
+    a.lidar = li
     a.report()
-    a.lidar.recorder.close()
+    li.recorder.close()
     d = load(str(tmp_path))
     assert list(d["truth_xyz"][0]) == [1.0, 2.0, 0.3] and list(d["truth_t"]) == [clock.t]

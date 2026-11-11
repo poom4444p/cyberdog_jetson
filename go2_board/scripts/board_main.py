@@ -22,75 +22,104 @@ from go2_board.lidar import Lidar
 from go2_board.sim_bus import SimBus
 from go2_board.walker import PolicyWalker
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--iface", default=None, help="DDS interface (default lo0 on macOS, lo on Linux)")
-ap.add_argument("--seconds", type=float, default=None, help="stop after this long (default: run)")
-ap.add_argument("--no-lidar", action="store_true", help="no Mid-360: velocity is not limited")
-ap.add_argument("--policy", default=None, help="walking policy folder (policy_spec.json, policy.npz)")
-ap.add_argument("--record", default=None, metavar="DIR",
-                help="save the raw Mid-360 frames, its IMU and the bus's pose to DIR "
-                     "(go2_board.record: a dataset to test a LIO against)")
-ap.add_argument("--stale-ms", type=float, default=None,
-                help="SIM ONLY: go limp after this long without a LowState (default %.0f ms). "
-                     "A Mac running the sim, VAMOS and the brain pauses for longer now and then; "
-                     "the real dog's motors do not" % (STALE_S * 1e3))
-ap.add_argument("--listen", default=HOST,
-                help="address to take the brain's commands on (default %(default)s). For a brain on "
-                     "another machine, this board's address on that one link, e.g. 192.168.55.1 "
-                     "over USB-C: never 0.0.0.0, or anyone on the LAN can drive the dog")
-ap.add_argument("--brain", default=HOST,
-                help="where the brain listens for state and clouds (default %(default)s)")
-args = ap.parse_args()
-if args.listen in ("0.0.0.0", ""):
-    ap.error("--listen 0.0.0.0 would take commands from every network the board is on")
 
-walker = None
-if args.policy:
-    walker = PolicyWalker(args.policy)      # refuses a policy that fails its samples
-    print(f"[board] walking policy {walker.name}: {walker.decimation}-tick period, "
-          f"samples match to {walker.worst:.1e}")
+def main():
+    """Everything runs from here: LidarProcess starts its child with `spawn`,
+    which imports this script again in the child -- code at the top level
+    would run there too (it did: a second board_main, a second LiDAR
+    process, and multiprocessing refusing to start it)."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--iface", default=None, help="DDS interface (default lo0 on macOS, lo on Linux)")
+    ap.add_argument("--seconds", type=float, default=None, help="stop after this long (default: run)")
+    ap.add_argument("--no-lidar", action="store_true", help="no Mid-360: velocity is not limited")
+    ap.add_argument("--policy", default=None, help="walking policy folder (policy_spec.json, policy.npz)")
+    ap.add_argument("--lidar-in-process", action="store_true",
+                    help="run the Mid-360 as a thread in this process (the old way), not its "
+                         "own process (go2_board.lidar_proc): only for a light test stream")
+    ap.add_argument("--record", default=None, metavar="DIR",
+                    help="save the raw Mid-360 frames, its IMU and the bus's pose to DIR "
+                         "(go2_board.record: a dataset to test a LIO against)")
+    ap.add_argument("--stale-ms", type=float, default=None,
+                    help="SIM ONLY: go limp after this long without a LowState (default %.0f ms). "
+                         "A Mac running the sim, VAMOS and the brain pauses for longer now and then; "
+                         "the real dog's motors do not" % (STALE_S * 1e3))
+    ap.add_argument("--listen", default=HOST,
+                    help="address to take the brain's commands on (default %(default)s). For a brain on "
+                         "another machine, this board's address on that one link, e.g. 192.168.55.1 "
+                         "over USB-C: never 0.0.0.0, or anyone on the LAN can drive the dog")
+    ap.add_argument("--brain", default=HOST,
+                    help="where the brain listens for state and clouds (default %(default)s)")
+    args = ap.parse_args()
+    if args.listen in ("0.0.0.0", ""):
+        ap.error("--listen 0.0.0.0 would take commands from every network the board is on")
 
-bus = SimBus(args.iface) if args.iface else SimBus()
-bus.wait_for_state()
-lidar = None if args.no_lidar else Lidar(brain=(args.brain, BRAIN_CLOUD_PORT))
-if lidar is not None and args.record:
+    walker = None
+    if args.policy:
+        walker = PolicyWalker(args.policy)      # refuses a policy that fails its samples
+        print(f"[board] walking policy {walker.name}: {walker.decimation}-tick period, "
+              f"samples match to {walker.worst:.1e}")
+
+    bus = SimBus(args.iface) if args.iface else SimBus()
+    bus.wait_for_state()
     from go2_board import lidar as lidar_mod
-    from go2_board.record import LioRecorder
-    lidar.recorder = LioRecorder(args.record, clock=lidar.clock, meta={
-        "mount_pitch_deg": lidar_mod.MOUNT_PITCH, "mount_x": lidar_mod.MOUNT_X,
-        "sensor_height": lidar_mod.SENSOR_HEIGHT, "board_clock": "time.monotonic"})
-    print(f"[board] recording Mid-360 frames, IMU and the bus pose to {args.record}")
-if lidar is not None:
-    lidar.start()
-    rx = lidar.rx
-    print(f"[board] Mid-360 receive buffer {rx.rcvbuf / 2**20:.1f} MB")
-    if rx.rcvbuf_short:
-        print(f"[board] WARNING: the kernel capped the Mid-360 receive buffer at "
-              f"{rx.rcvbuf // 1024} KB: a dense frame is ~300 KB, so packets will be "
-              f"lost and frames dropped as partial. Fix: {livox.RCVBUF_FIX}")
-stale_s = STALE_S if args.stale_ms is None else args.stale_ms / 1e3
-if stale_s != STALE_S:
-    print(f"[board] WARNING: stale-state limit {stale_s * 1e3:.0f} ms, not {STALE_S * 1e3:.0f}: "
-          "for a simulator only, never on the dog")
-board = Board(bus, stale_s=stale_s)
-link = BoardLink(clock=board.clock, listen=args.listen, brain_host=args.brain)
-app = App(bus, link=link, lidar=lidar, walker=walker, board=board)
-print(f"[board] up, LIMP; waiting for the brain on udp {args.listen}:9870, state to "
-      f"{args.brain}:{BRAIN_PORT}"
-      + ("" if lidar is None else f"; Mid-360 on udp 56301, clouds to {args.brain}:{BRAIN_CLOUD_PORT}"))
-# `onboard.sh stop` is a SIGTERM: exit through the finally below (limp, the
-# LiDAR stopped, a recording's last chunk written), not straight out of it.
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-try:
-    app.run(args.seconds)
-finally:
-    app.board.go_limp()
+    meta = {"mount_pitch_deg": lidar_mod.MOUNT_PITCH, "mount_x": lidar_mod.MOUNT_X,
+            "sensor_height": lidar_mod.SENSOR_HEIGHT, "board_clock": "time.monotonic"}
+    lidar = None
+    if args.no_lidar:
+        pass
+    elif args.lidar_in_process:
+        lidar = Lidar(brain=(args.brain, BRAIN_CLOUD_PORT))
+        if args.record:
+            from go2_board.record import LioRecorder
+            lidar.recorder = LioRecorder(args.record, clock=lidar.clock, meta=meta)
+        lidar.start()
+        rcvbuf, short = lidar.rx.rcvbuf, lidar.rx.rcvbuf_short
+    else:
+        # Its own process: the motor loop never waits on the LiDAR (lidar_proc).
+        from go2_board.lidar_proc import LidarProcess
+        lidar = LidarProcess(brain=(args.brain, BRAIN_CLOUD_PORT), record=args.record, meta=meta).start()
+        rcvbuf, short = lidar.rcvbuf, lidar.rcvbuf_short
     if lidar is not None:
-        lidar.stop()
-        if lidar.recorder is not None:
-            lidar.recorder.close()
-        print(f"[board] Mid-360 frames: {lidar.used} used, {lidar.partial} dropped as part of a "
-              f"sweep; receiver {lidar.rx.stats() if lidar.rx is not None else '-'}")
-    s = app.board.stats
-    print(f"[board] stopped: ticks {s['ticks']}, sent {s['sent']}, mode {app.modes.mode}, "
-          f"safety {app.board.safety.tripped or 'never tripped'}")
+        where = "in this process" if args.lidar_in_process else f"own process, pid {lidar.proc.pid}"
+        print(f"[board] Mid-360 ({where}): receive buffer {rcvbuf / 2**20:.1f} MB")
+        if short:
+            print(f"[board] WARNING: the kernel capped the Mid-360 receive buffer at "
+                  f"{rcvbuf // 1024} KB: a dense frame is ~300 KB, so packets will be "
+                  f"lost and frames dropped as partial. Fix: {livox.RCVBUF_FIX}")
+        if args.record:
+            print(f"[board] recording Mid-360 frames, IMU and the bus pose to {args.record}")
+    stale_s = STALE_S if args.stale_ms is None else args.stale_ms / 1e3
+    if stale_s != STALE_S:
+        print(f"[board] WARNING: stale-state limit {stale_s * 1e3:.0f} ms, not {STALE_S * 1e3:.0f}: "
+              "for a simulator only, never on the dog")
+    board = Board(bus, stale_s=stale_s)
+    link = BoardLink(clock=board.clock, listen=args.listen, brain_host=args.brain)
+    app = App(bus, link=link, lidar=lidar, walker=walker, board=board)
+    print(f"[board] up, LIMP; waiting for the brain on udp {args.listen}:9870, state to "
+          f"{args.brain}:{BRAIN_PORT}"
+          + ("" if lidar is None else f"; Mid-360 on udp 56301, clouds to {args.brain}:{BRAIN_CLOUD_PORT}"))
+    # `onboard.sh stop` is a SIGTERM: exit through the finally below (limp, the
+    # LiDAR stopped, a recording's last chunk written), not straight out of it.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        app.run(args.seconds)
+    finally:
+        app.board.go_limp()
+        if lidar is not None:
+            if args.lidar_in_process:
+                lidar.stop()
+                if lidar.recorder is not None:
+                    lidar.recorder.close()
+                final = {"used": lidar.used, "partial": lidar.partial,
+                         "receiver": lidar.rx.stats() if lidar.rx is not None else None}
+            else:
+                final = lidar.stop() or {}
+            print(f"[board] Mid-360 frames: {final.get('used')} used, {final.get('partial')} "
+                  f"dropped as part of a sweep; receiver {final.get('receiver')}")
+        s = app.board.stats
+        print(f"[board] stopped: ticks {s['ticks']}, sent {s['sent']}, mode {app.modes.mode}, "
+              f"safety {app.board.safety.tripped or 'never tripped'}")
+
+
+if __name__ == "__main__":
+    main()
