@@ -33,6 +33,9 @@
 #   TRACE=1      the brain prints its commands
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
+#   LIO_RECORD=1 route: the board saves the raw Mid-360 frames, its IMU and the world's
+#                true pose (go2_board.record); copied to $OUT/lio/. With
+#                LIDAR_ARGS=--dense for the real unit's point rate
 #   ROUTE_S      a route is stopped after this long, in seconds  (560)
 set -u
 
@@ -53,6 +56,8 @@ RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
 CLOUD_LOG=${CLOUD_LOG:-0}
+LIO_RECORD=${LIO_RECORD:-0}
+LIO_DIR=lio_record                 # on the board, under ~
 ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
 
@@ -170,7 +175,11 @@ case "${1:-}" in
     trap stop_all EXIT
     start_world
     on_board "$ONBOARD vamos"
-    on_board "$ONBOARD board" | tail -1
+    if [ "$LIO_RECORD" = 1 ]; then
+        on_board "rm -rf ~/$LIO_DIR; LIO_RECORD=~/$LIO_DIR $ONBOARD board" | tail -2
+    else
+        on_board "$ONBOARD board" | tail -1
+    fi
     start_gaps
     on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
     grep -E "ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|help|planner" \
@@ -184,6 +193,12 @@ case "${1:-}" in
     if [ "$CLOUD_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/clouds.npz" "$OUT/clouds.npz" \
             && echo "clouds: $OUT/clouds.npz" || echo "clouds: not copied"
+    fi
+    if [ "$LIO_RECORD" = 1 ]; then
+        on_board "$ONBOARD stop" > /dev/null 2>&1      # board_main writes its last chunk on exit
+        rsync -a -e "ssh -o BatchMode=yes" "$BOARD:$LIO_DIR/" "$OUT/lio/" \
+            && echo "lio: $OUT/lio ($(ls "$OUT/lio" | grep -c chunk_) chunks, $(du -sh "$OUT/lio" | cut -f1))" \
+            || echo "lio: not copied"
     fi
     grep -q "^ARRIVED" "$OUT/brain.log" ;;
 

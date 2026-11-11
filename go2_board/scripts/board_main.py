@@ -9,6 +9,8 @@ With --policy (a folder go2_train exported, e.g. policies/go2_flat_v1), WALK
 runs that policy; without one, "walk" is refused.
 """
 import argparse
+import signal
+import sys
 
 from go2_board.app import App
 from go2_board.link import BRAIN_PORT, HOST, BoardLink
@@ -24,6 +26,9 @@ ap.add_argument("--iface", default=None, help="DDS interface (default lo0 on mac
 ap.add_argument("--seconds", type=float, default=None, help="stop after this long (default: run)")
 ap.add_argument("--no-lidar", action="store_true", help="no Mid-360: velocity is not limited")
 ap.add_argument("--policy", default=None, help="walking policy folder (policy_spec.json, policy.npz)")
+ap.add_argument("--record", default=None, metavar="DIR",
+                help="save the raw Mid-360 frames, its IMU and the bus's pose to DIR "
+                     "(go2_board.record: a dataset to test a LIO against)")
 ap.add_argument("--stale-ms", type=float, default=None,
                 help="SIM ONLY: go limp after this long without a LowState (default %.0f ms). "
                      "A Mac running the sim, VAMOS and the brain pauses for longer now and then; "
@@ -46,7 +51,16 @@ if args.policy:
 
 bus = SimBus(args.iface) if args.iface else SimBus()
 bus.wait_for_state()
-lidar = None if args.no_lidar else Lidar(brain=(args.brain, BRAIN_CLOUD_PORT)).start()
+lidar = None if args.no_lidar else Lidar(brain=(args.brain, BRAIN_CLOUD_PORT))
+if lidar is not None and args.record:
+    from go2_board import lidar as lidar_mod
+    from go2_board.record import LioRecorder
+    lidar.recorder = LioRecorder(args.record, clock=lidar.clock, meta={
+        "mount_pitch_deg": lidar_mod.MOUNT_PITCH, "mount_x": lidar_mod.MOUNT_X,
+        "sensor_height": lidar_mod.SENSOR_HEIGHT, "board_clock": "time.monotonic"})
+    print(f"[board] recording Mid-360 frames, IMU and the bus pose to {args.record}")
+if lidar is not None:
+    lidar.start()
 stale_s = STALE_S if args.stale_ms is None else args.stale_ms / 1e3
 if stale_s != STALE_S:
     print(f"[board] WARNING: stale-state limit {stale_s * 1e3:.0f} ms, not {STALE_S * 1e3:.0f}: "
@@ -57,12 +71,17 @@ app = App(bus, link=link, lidar=lidar, walker=walker, board=board)
 print(f"[board] up, LIMP; waiting for the brain on udp {args.listen}:9870, state to "
       f"{args.brain}:{BRAIN_PORT}"
       + ("" if lidar is None else f"; Mid-360 on udp 56301, clouds to {args.brain}:{BRAIN_CLOUD_PORT}"))
+# `onboard.sh stop` is a SIGTERM: exit through the finally below (limp, the
+# LiDAR stopped, a recording's last chunk written), not straight out of it.
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 try:
     app.run(args.seconds)
 finally:
     app.board.go_limp()
     if lidar is not None:
         lidar.stop()
+        if lidar.recorder is not None:
+            lidar.recorder.close()
     s = app.board.stats
     print(f"[board] stopped: ticks {s['ticks']}, sent {s['sent']}, mode {app.modes.mode}, "
           f"safety {app.board.safety.tripped or 'never tripped'}")
