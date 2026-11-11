@@ -2596,7 +2596,7 @@ class Run:
             self.evading = 0.0
             return 0.0
         board = None
-        if getattr(self.robot, "REAL_TIME", False):
+        if getattr(self.robot, "GUARDED", False):
             board = self.robot.board_clearance()
             if board is None:                            # blind: the board will not step it
                 self.evading = 0.0
@@ -3216,9 +3216,10 @@ class Run:
             elif self.evading:
                 self.evading = 0.0
             # The board's guard is the real sensor's word: what the plan wants
-            # it cannot overrule, so it works with it instead (a robot that
-            # walks itself only; the twin has no guard to meet).
-            if getattr(self.robot, "REAL_TIME", False):
+            # it cannot overrule, so it works with it instead (a robot with a
+            # guard: go2_board, or the twin modelling it; the plain twin has
+            # none to meet).
+            if getattr(self.robot, "GUARDED", False):
                 cmd = self.respect_board(cmd, (x, y, yaw))
                 if self.board_gave_up:
                     return False, n
@@ -3634,9 +3635,18 @@ def main():
     ap.add_argument("--autolabel", default=None, metavar="DIR",
                     help="keep onboard frames labelled with the path the dog then walked, "
                          "for the VAMOS LoRA (sim/autolabel.py); map-only, not with --vamos")
-    ap.add_argument("--robot", choices=["twin", "go2_board"], default="twin",
-                    help="who walks: the kinematic twin, or go2_board over its link "
+    ap.add_argument("--robot", choices=["twin", "twin-board", "go2_board"], default="twin",
+                    help="who walks: the kinematic twin; the twin turning late and short "
+                         "and stopped by the board's guard, as go2_board walks the dog "
+                         "(robot/board_model_robot.py); or go2_board over its link "
                          "(go2_world's physics or the dog; floor 1 only)")
+    ap.add_argument("--start", default=None, metavar="X,Y[,YAW]",
+                    help="twin: start here on floor 1 (map frame; yaw rad) instead of the "
+                         "main entrance -- e.g. 20.92,9.5,0 where HIL routes start "
+                         "(go2_world's spawn)")
+    ap.add_argument("--board-clock", type=float, default=1.0, metavar="F",
+                    help="twin-board: walk F of real time (0.83: as the HIL rig's world "
+                         "does, to compare with HIL logs; default 1.0, the policy alone)")
     ap.add_argument("--board-host", default=None, metavar="IP",
                     help="with --robot go2_board: the board's address when it is another "
                          "machine (HIL over USB-C: 192.168.55.1); default localhost")
@@ -3695,7 +3705,10 @@ def main():
             start_xy, legs, faces = plan_stops(router, stops,
                                                start=(START_FLOOR, robot.get_pose()[:2]))
         else:
-            start_xy, legs, faces = plan_stops(router, stops)
+            start = None
+            if args.start:
+                start = (START_FLOOR, tuple(float(v) for v in args.start.split(",")[:2]))
+            start_xy, legs, faces = plan_stops(router, stops, start=start)
     except NoAccessibleRoute as refusal:
         raise SystemExit(f"[voice] {refusal}\nREFUSED BY planning: no accessible route")
     except SystemExit as refusal:
@@ -3707,6 +3720,12 @@ def main():
     first = legs[0][2]
     yaw0 = math.atan2(first[1][1] - first[0][1], first[1][0] - first[0][0]) \
         if len(first) > 1 else 0.0
+    if args.start and len(args.start.split(",")) > 2:
+        yaw0 = float(args.start.split(",")[2])
+    if args.robot == "twin-board":
+        from cyberdog.sim.robot.board_model_robot import BoardModelRobot
+        robot = BoardModelRobot(scene, start_xy=start_xy, start_yaw=yaw0,
+                                start_z=levels.floor_z(START_FLOOR), clock=args.board_clock)
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
               crowd=args.pedestrians, seed=args.seed, aware=args.crowd == "aware",
@@ -3717,7 +3736,7 @@ def main():
               handle=handle if args.handle else None,
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
               robot=robot)
-    if robot is not None:
+    if robot is not None and hasattr(robot, "start"):
         robot.start()
 
     ok, halted = True, None
@@ -3839,6 +3858,8 @@ def main():
     else:
         print("handler: none -- the person on the handle never touched a wall or an obstacle")
     print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
+    if hasattr(run.robot, "guarded_ticks"):          # --robot twin-board
+        print(f"board guard (modelled) cut the command: {run.robot.guarded_ticks / FPS:.1f}s")
     if run.aff is not None:
         run.aff_log.close()
         an = run.aff_n

@@ -18,6 +18,7 @@ class Live:
 
 class Board:
     REAL_TIME = True
+    GUARDED = True             # as BoardTwinRobot: step_aside reads the guard
 
     def __init__(self, left=1.0, right=1.0):
         self.free = {"front": OPEN, "back": math.inf, "left": left, "right": right}

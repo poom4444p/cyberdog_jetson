@@ -205,6 +205,7 @@ class BoardTwinRobot(MujocoRobot):
     """
     MAX_W = 1.0               # rad/s: go2_flat_v5 is trained to +-1
     REAL_TIME = True          # the board walks on the wall clock: never block the loop
+    GUARDED = True            # its LiDAR guard has the last word: run_building works with it
     LIMP_HOLD = 4             # 20 Hz ticks of "limp" between two stands: 0.2 s
     # place() on the board is a pose to walk to, not one to be put at: the
     # scripted moves in and out of the lift car become velocity commands that
