@@ -150,7 +150,9 @@ def hazards(router):
 @pytest.fixture
 def model(monkeypatch):
     """A stand-in for language/infer.py: no torch, and it counts its calls."""
-    answers = {"I could do with a bite": "cafeteria", "take me to the moon": "unknown",
+    # "I could do with some soup": a need no rule reads (since "bite" became
+    # one, see test_needs_gemma_read_are_rules_now).
+    answers = {"I could do with some soup": "cafeteria", "take me to the moon": "unknown",
                "somewhere to print my essay": "librery", "go somewhere nice": "the beach",
                "garble": ValueError}
     calls = []
@@ -179,9 +181,9 @@ def test_nlu_is_not_asked_when_a_place_is_named(router, model):
 
 def test_nlu_answer_is_confirmed(router, model):
     guessed = []
-    assert resolve_stops(router, "I could do with a bite", use_nlu=True,
+    assert resolve_stops(router, "I could do with some soup", use_nlu=True,
                          guessed=guessed) == [("cafeteria", None)]
-    assert guessed == [(0, "cafeteria", "I could do with a bite")]
+    assert guessed == [(0, "cafeteria", "I could do with some soup")]
 
 
 def test_nlu_near_name_is_held_to_the_map(router, model):
@@ -196,10 +198,10 @@ def test_nlu_unknown_or_off_map_or_broken_is_a_refusal(router, model, said):
 
 def test_one_stop_by_name_one_by_model(router, model):
     guessed = []
-    stops = resolve_stops(router, "go to the libary, then I could do with a bite",
+    stops = resolve_stops(router, "go to the libary, then I could do with some soup",
                           use_nlu=True, guessed=guessed)
     assert stops == [("library", None), ("cafeteria", None)]
-    assert [c.lower() for c in model] == ["i could do with a bite"]
+    assert [c.lower() for c in model] == ["i could do with some soup"]
     assert [g[:2] for g in guessed] == [(0, "library"), (1, "cafeteria")]
 
 
@@ -296,3 +298,39 @@ def test_two_needs_for_one_place_are_fine(router):
 
 def test_no_need_leads_to_the_stairs_or_the_lift():
     assert "stairs" not in NEEDS and "lift" not in NEEDS
+
+
+# --- what the Gemma parser was for on the dog, as rules ----------------------
+# Gemma does not fit on the J4012 next to VAMOS (README, "Not on the J4012"),
+# so what it read that the rules did not is in the rules now.
+
+@pytest.mark.parametrize("said, place, nickname", [
+    ("Which way to the dining hall?", "cafeteria", "dining hall"),   # was the hallway
+    ("Could you guide me to the lavatory?", "restroom", "lavatory"),  # was the elevator, by sound
+    ("We're going to the way out.", "main entrance", "way out"),
+    ("Check the data room, anyone is there", "server room", "data room"),
+    ("take me to the electronics lab", "electrical engineering lab", "electronics lab"),
+    ("go to the mech lab", "mechanical engineering lab", "mech lab"),
+])
+def test_held_out_nicknames_are_read_without_the_model(router, said, place, nickname):
+    guessed = []
+    assert resolve_stops(router, said, guessed=guessed) == [(place, None)]
+    assert guessed == [(0, place, nickname)]                 # still asked before moving
+
+
+@pytest.mark.parametrize("said, place", [
+    ("I could do with a bite", "cafeteria"),                 # Gemma's answer on the J4012
+    ("let's grab a snack", "cafeteria"),
+    ("time for breakfast", "cafeteria"),
+    ("I'm a bit peckish", "cafeteria"),
+    ("I have homework to do", "library"),
+])
+def test_needs_gemma_read_are_rules_now(router, said, place):
+    assert resolve_stops(router, said, guessed=[]) == [(place, None)]
+
+
+def test_nlu_without_torch_says_so(router, monkeypatch):
+    # The J4012's brain venv has no torch: a clear answer, not an ImportError.
+    monkeypatch.setitem(sys.modules, "cyberdog.language.infer", None)
+    with pytest.raises(SystemExit, match="Mac only"):
+        resolve_stops(router, "take me somewhere nice", use_nlu=True)

@@ -116,13 +116,19 @@ def near_place(names, command, hazards=()):
 # (generate_dataset.py), read here as well, so a nickname reaches its place
 # without the model -- with --nlu off it used to be refused. One table for
 # both, so they cannot drift; add a building's real nicknames there.
+# The held-out ones too ("dining hall", "lavatory", "way out"): they are kept
+# out of the model's training to test it, but the dog runs these rules, not
+# the model -- Gemma does not fit on the J4012 next to VAMOS (4.7 GB of GPU
+# memory against 4.9 GB free; no 4-bit kernels for the Orin's sm_87). Without
+# them "dining hall" was the hallway and "lavatory" the elevator, by sound.
 # The stairs' aliases are left out: the stairs are only ever taken from
 # their name said out loud (BuildingRouter.hazard_named), and "steps" is in
 # "take a few steps back".
 def _aliases():
-    from cyberdog.language.generate_dataset import LAB_ALIASES, OTHER_ALIASES
+    from cyberdog.language.generate_dataset import (HELD_OUT_ALIASES, LAB_ALIASES,
+                                                    OTHER_ALIASES)
     return {alias.lower(): place
-            for table in (OTHER_ALIASES, LAB_ALIASES)
+            for table in (OTHER_ALIASES, LAB_ALIASES, HELD_OUT_ALIASES)
             for place, said in table.items() if place != "stairs"
             for alias in said if alias.lower() != place}
 
@@ -149,14 +155,17 @@ def alias_place(names, command):
 # These used to be --nlu's job, which means loading the Gemma parser on the
 # dog for a handful of phrases. As rules they need no model, and the GPU stays
 # free for VAMOS. The words are those of generate_dataset.IMPLICIT_SLANG, the
-# phrases the model is taught; a test holds every one of those to this table.
+# phrases the model is taught (a test holds every one of those to this
+# table), and the ones it answered on the J4012 that no rule read ("I could
+# do with a bite").
 # Not the lift ("another floor" is floor_parser's) and never the stairs.
 NEEDS = {
     "restroom": ["pee", "potty", "number 1", "number 2", "nature's calling",
                  "wash my hands", "freshen up"],
     "cafeteria": ["hungry", "starving", "eat", "food", "lunch", "lunchtime",
-                  "thirsty", "drink", "coffee"],
-    "library": ["study", "read", "book", "books"],
+                  "thirsty", "drink", "coffee", "bite", "snack", "breakfast",
+                  "dinner", "meal", "peckish"],
+    "library": ["study", "read", "book", "books", "homework", "revise"],
     "main entrance": ["leave", "get me out", "out of this building",
                       "done for the day", "go home"],
 }
