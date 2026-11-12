@@ -6,7 +6,7 @@
 #   bash scripts/hil/run_hil.sh sync              copy this repo (brain and go2_board/), as checked out, to the board
 #   bash scripts/hil/run_hil.sh clock             set the board's clock from this Mac (sudo there)
 #   bash scripts/hil/run_hil.sh walk              stand, walk 4 s, stand: is the board's loop sound? (~1 min)
-#   bash scripts/hil/run_hil.sh route DEST [N]    the whole route to DEST, VAMOS asked for N paths (2)
+#   bash scripts/hil/run_hil.sh route DEST [N]    the whole route to DEST, VAMOS asked for N paths (5)
 #   bash scripts/hil/run_hil.sh stop              stop the world here and the board and brain there
 #
 # Each run writes its logs to $OUT (output/hil/<time>-<what>) and ends with a
@@ -212,7 +212,7 @@ case "${1:-}" in
         on_board "POSE=$POSE $ONBOARD board" | tail -1
     fi
     start_gaps
-    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-2}" > "$OUT/brain.log" 2>&1
+    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
     grep -E "ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
