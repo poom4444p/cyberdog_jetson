@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from transformers import AutoProcessor, AutoModelForImageTextToText
 from peft import PeftConfig, PeftModel
 import io
+import time
 import base64
 from typing import List, Optional, Dict, Any
 import logging
@@ -62,6 +63,9 @@ device = ("cuda" if torch.cuda.is_available()
           else "cpu")   # Apple Silicon: use the GPU instead of falling back to CPU
 # Global variable for natural language steering instructions
 steering_instructions = ""
+# CyberDog: see install_shared_prefill. --no_shared_prefill turns it off.
+shared_prefill = True
+shared_prefill_calls = 0
 return_trajectories = False
 latest_image = {"content": None, "content_type": None}
 text_coordinates = ""
@@ -196,6 +200,56 @@ def decode_trajectory_string(trajectory_string, img_height, img_width, expected_
     
     return coords_tensor
 
+def install_shared_prefill(m):
+    """CyberDog: run beam search's prefill once instead of once per beam.
+
+    generate(num_beams=5) copies the image and prompt into 5 identical rows
+    before its first forward call, so the vision tower and the whole prompt
+    ran 5 times: about 1.8 s of a 4.6 s call on the J4012 (bf16, 25 W). This
+    wraps forward: a call with pixel_values whose rows are all the same runs
+    row 0 alone and repeats its logits and KV cache to every row. The beam
+    search itself (scores, finished paths, EOS) is HF's, untouched.
+
+    The same paths up to rounding: in fp32, 12/12 cases token-for-token equal
+    with and without it; in bf16 batch 1 and batch 5 round differently, and
+    each is as far from fp32 as the other (top path equal to fp32's in 6/12
+    cases either way). 4.6 -> 2.8 s a call.
+
+    Tested on transformers 5.17 only: older versions preallocate Gemma2's
+    cache for the full batch, which a batch-1 prefill would not fill. Off there.
+    """
+    import functools
+    import transformers
+    if int(transformers.__version__.split(".")[0]) < 5:
+        logger.warning(f"shared prefill OFF: transformers {transformers.__version__}, tested on 5.x only")
+        return False
+    target = m.get_base_model() if hasattr(m, "get_base_model") else m   # generate() runs there
+    forward = target.forward
+
+    @functools.wraps(forward)             # generate() checks its kwargs against this signature
+    def forward_shared_prefill(*args, **kw):
+        global shared_prefill_calls
+        ids, pv = kw.get("input_ids"), kw.get("pixel_values")
+        if (ids is None or pv is None or ids.shape[0] < 2
+                or not bool((ids == ids[:1]).all()) or not bool((pv == pv[:1]).all())):
+            return forward(*args, **kw)
+        k = ids.shape[0]
+        one = {n: (v[:1] if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == k else v)
+               for n, v in kw.items()}
+        out = forward(*args, **one)
+        out.past_key_values.batch_repeat_interleave(k)
+        for name in list(out.keys()):
+            v = out[name]
+            if torch.is_tensor(v) and v.dim() > 0 and v.shape[0] == 1:
+                out[name] = v.repeat_interleave(k, 0)
+        shared_prefill_calls += 1
+        return out
+
+    target.forward = forward_shared_prefill
+    logger.info("shared prefill ON: beam search runs the image and prompt once")
+    return True
+
+
 def load_model(model_path, use_fp32=False, trust_remote_code=True):
     """Load the VLM model and processor."""
     global model, processor, device, loaded_model_path
@@ -228,6 +282,8 @@ def load_model(model_path, use_fp32=False, trust_remote_code=True):
             logger.info(f"Model object: {type(model)}, Processor object: {type(processor)}")
             logger.info(f"Global model id: {id(model)}, Global processor id: {id(processor)}")
             loaded_model_path = model_path
+            if shared_prefill:
+                install_shared_prefill(model)
             return True, f"LoRA model loaded successfully from {model_path} on {device.upper()}!"
         else:
             # Load regular model
@@ -243,6 +299,8 @@ def load_model(model_path, use_fp32=False, trust_remote_code=True):
             ).to(device)
             
             loaded_model_path = model_path
+            if shared_prefill:
+                install_shared_prefill(model)
             return True, f"Model loaded successfully from {model_path} on {device.upper()}!"
     except Exception as e:
         # Clear memory on error
@@ -292,10 +350,17 @@ def generate_trajectories(image, text_prompt, max_tokens, temperature, top_k, nu
             if num_beams > 1:
                 generation_kwargs["num_beams"] = num_beams
                 
+            shared_before = shared_prefill_calls
+            t_gen = time.perf_counter()
             outputs = model.generate(
                 **model_input,
                 **generation_kwargs
             )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            logger.info(f"generate: {(time.perf_counter() - t_gen) * 1000:.0f} ms, beams {num_beams}, "
+                        f"samples {num_samples}, prefill "
+                        f"{'shared' if shared_prefill_calls > shared_before else 'per row'}")
     except Exception as e:
         error_message = f"Error during model generation: {str(e)}"
         logger.error(error_message)
@@ -741,6 +806,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True, help="Path to preload model")
     parser.add_argument("--use_fp32", action="store_true", help="Use FP32 precision")
     parser.add_argument("--trust_remote_code", action="store_true", default=True, help="Trust remote code")
+    parser.add_argument("--no_shared_prefill", action="store_true",
+                        help="Run beam search's prefill once per beam, as upstream does "
+                             "(default: once, see install_shared_prefill)")
     # CyberDog: upstream hard-coded uvicorn's limit_max_requests=1000, which
     # recycles the process after 1000 requests. That is for a supervisor that
     # restarts it; run by hand nothing does, and the server simply exited in
@@ -751,6 +819,7 @@ if __name__ == "__main__":
                              "(0 = never, the default)")
     
     args = parser.parse_args()
+    shared_prefill = not args.no_shared_prefill
     
     # Use environment variables with fallbacks (like NaVILA server)
     host = args.host or os.environ.get("BIND_HOST", "0.0.0.0")
