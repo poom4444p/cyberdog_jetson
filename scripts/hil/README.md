@@ -133,6 +133,27 @@ lowcmd (board)      466/s  median  2.0  p99   3.5  ...
 own socket, it shows what is on the wire, not how fresh the states the board
 uses are: those need go2_board's own check (`tests/test_sim_bus.py`).
 
+A route then stops the board (its log's last lines: how it stopped, and with
+`POSE=lio` the odometry's error against the world's pose), then the world,
+and prints the world's own score of the run, on the physics itself
+(go2_world's `score.py`):
+
+```
+world truth: 81s of simulated time scored
+world truth: collisions: none -- no part of the dog touched a wall or an obstacle
+world truth: contact: none -- closest it came to anybody was 0.84 m
+```
+
+with a `world: t=... COLLISION starts/ends` or `CONTACT starts/ends` line
+for each one, in go2_world's frame (the map's is that + (21.0, 9.5)). These
+are the lines to trust. The brain's own `collisions:`/`handler:` lines are
+marked `[on the board's pose]`: its twin is put where the board says the dog
+is, which with `POSE=lio` is off by the odometry's error. It has no people of
+its own in HIL, so it no longer prints a contact distance (it printed
+"closest ... 99.00 m", its starting value, in every HIL run before 11-12).
+The person on the handle exists only in the brain: `handler:` stays scored
+on the board's pose.
+
 ## Settings worth knowing
 
 - **`STALE_MS`** (`onboard.sh`, default 200): the board goes limp after this long
