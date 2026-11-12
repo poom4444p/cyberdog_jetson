@@ -92,6 +92,15 @@ EXIT_TURN_MIN = math.radians(35)  # less than this off straight out: the leg tur
 EXIT_TURN_W = 0.5         # rad/s: the turn, scripted, slow enough to follow on a handle
 EXIT_SHIFT = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)   # m from WAIT_XY towards the way on
 STAIR_V = 0.25            # m/s along a flight: a tread at a time, a third of corridor pace
+# CE-RRT* searches on the control thread, ~160 ms each on the J4012 (25 W).
+# A search that found nothing used to be repeated on every tick, at both of
+# ce_rrt.SPEEDS in turn: ~320 ms ticks, the loop at ~3 Hz beside people
+# (HIL 11-12 13:10: 118 searches, 55 found nothing, 28 s of the run). Now one
+# speed a search, the next speed on the next, and after one that found
+# nothing the dog waits as it would with no plan (the fallback the chance
+# constraint rests on) and searches again this much later. In ticks, not on
+# the clock: the plans stay repeatable (ce_rrt's docstring, Gate D).
+PLAN_RETRY_S = 0.5
 # VAMOS is asked back to back: as soon as an answer lands, from the newest
 # frame. It used to be asked on 20-tick boundaries (10 while blocked), and an
 # answer that landed between two of them waited for the next, ~0.5 s a cycle
@@ -1274,13 +1283,16 @@ class Run:
         self.planner = planner         # "map": wait for people; "cerrt": go round
         self.plan = None               # the ce_rrt.Plan being walked, if any
         self.plan_at = -1              # tick it was made
+        self.plan_failed = None        # tick the last search found nothing: see PLAN_RETRY_S
+        self.plan_speed = 0            # index into ce_rrt.SPEEDS the next search tries
         self.plan_floor = None         # (static, crate, nose, handle) room this
                                        # going-round may not go below: fixed
                                        # when it starts, like the goal
         self.plan_goal = None          # where this going-round is going: fixed
                                        # until it is reached, so each replan
                                        # aims where the last one did
-        self.plans = {"rounds": 0, "made": 0, "none": 0, "ms": 0.0, "ticks": 0}
+        self.plans = {"rounds": 0, "made": 0, "none": 0, "ms": 0.0, "ticks": 0,
+                      "worst_ms": 0.0}
         self.why_wait = collections.Counter()  # why a wait was not a going-round
         self.gave_up = None       # (layer, why) when follow() ends a leg short
         self.evading = 0.0             # sideways m/s while stepping aside, or 0
@@ -2379,6 +2391,12 @@ class Run:
             walked += d
         return pts[-1]
 
+    def plan_backoff(self, n):
+        """Tick n is inside PLAN_RETRY_S of a search that found nothing, with
+        no plan to walk: wait rather than search again."""
+        return (self.plan is None and self.plan_failed is not None
+                and n - self.plan_failed < round(PLAN_RETRY_S * FPS))
+
     def go_round(self, live, tracks, pose, route, gates, n, speed, ignore=()):
         """(where to steer to go round people, or None to carry on as before;
         somebody to stand still for). --planner cerrt.
@@ -2417,9 +2435,15 @@ class Run:
                     break
         self.no_plan = None
         if threat is None and self.plan is None:
+            self.plan_failed, self.plan_speed = None, 0     # the next going-round starts afresh
             return None, None
         if self.door_near(gates, (x, y), PLAN_DOOR):
             self.plan, self.no_plan = None, "doorway"
+            return None, close
+        if self.plan_backoff(n):
+            # Nothing found a moment ago: wait, as for no plan, and search
+            # again in PLAN_RETRY_S, not on every tick.
+            self.no_plan = "no safe path"
             return None, close
         if self.plan is None or n - self.plan_at >= round(ce_rrt.REPLAN_S * FPS):
             # The same goal for the whole of one going-round. Picked afresh
@@ -2465,13 +2489,16 @@ class Run:
 
             t0 = time.perf_counter()
             warm = ahead(self.plan.path, (x, y)) if self.plan else None
-            new = None
-            for v in ce_rrt.SPEEDS:
-                new = ce_rrt.plan((x, y, yaw), goal, ok, people, warm=warm,
-                                  handler_behind=HANDLER_BEHIND, v=v, seed=n)
-                if new is not None:
-                    break
-            self.plans["ms"] += (time.perf_counter() - t0) * 1000
+            # One speed a search (see PLAN_RETRY_S); the next search after
+            # one that found nothing tries the next speed.
+            new = ce_rrt.plan((x, y, yaw), goal, ok, people, warm=warm,
+                              handler_behind=HANDLER_BEHIND,
+                              v=ce_rrt.SPEEDS[self.plan_speed], seed=n)
+            if new is None:
+                self.plan_speed = (self.plan_speed + 1) % len(ce_rrt.SPEEDS)
+            ms = (time.perf_counter() - t0) * 1000
+            self.plans["ms"] += ms
+            self.plans["worst_ms"] = max(self.plans["worst_ms"], ms)
             self.plan_at = n
             if new is None and self.plan is not None and ce_rrt.still_good(
                     (x, y, yaw), warm, ok, people, handler_behind=HANDLER_BEHIND,
@@ -2481,11 +2508,13 @@ class Run:
                 new = self.plan._replace(path=[(x, y)] + list(warm[1:]))
             if new is None:
                 self.plans["none"] += 1
+                self.plan_failed = n
                 self.plan, self.no_plan = None, "no safe path"
                 # No way round. Further off, yield_to waits for them; this
                 # close it would not, so stand still here.
                 return None, close
             self.plans["made"] += 1
+            self.plan_failed = None
             if self.plan is None and threat is not None:
                 # Said before the dog leans, as for a crate: which way the
                 # handle is about to go is what the person cannot see coming.
@@ -3966,7 +3995,7 @@ def main():
             print(f"planner: CE-RRT*, went round somebody {pl['rounds']} times, "
                   f"{pl['ticks'] / FPS:.1f}s on a plan; {tried} plans, "
                   f"{pl['none']} found nothing, "
-                  f"{pl['ms'] / max(tried, 1):.0f} ms each")
+                  f"{pl['ms'] / max(tried, 1):.0f} ms each, worst {pl['worst_ms']:.0f} ms")
             if run.evade["steps"]:
                 print(f"planner: stepped aside for somebody {run.evade['steps']} times, "
                       f"{run.evade['ticks'] / FPS:.1f}s stepping")
