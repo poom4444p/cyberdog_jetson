@@ -41,7 +41,7 @@ import time
 
 import numpy as np
 
-from go2_board.livox import LivoxReceiver
+from go2_board.livox import LivoxReceiver, _ask_rcvbuf, udp_drops
 
 # Mount, sensor frame -> trunk: must match go2_world/mid360.py until the real
 # bracket is measured. SENSOR_HEIGHT is only where the floor search starts:
@@ -303,41 +303,94 @@ class Cloud:
         self.seq, self.xyz, self.stamp, self.t = seq, xyz, stamp, t
 
 
+CLOUD_RCVBUF = 4 << 20      # ~7 dense clouds (a 7.2 KB datagram costs ~16 KB of buffer)
+
+
 class CloudLink:
     """The brain's end (for Cyberdog): the newest whole cloud, or None.
     A frame missing a chunk is dropped when the next one starts, never
-    handed over half done."""
+    handed over half done.
 
-    def __init__(self, port=BRAIN_CLOUD_PORT, host=HOST):
+    Polled only, the socket is emptied only when the caller asks: the brain
+    asked only while walking, so through a lift ride (~25 s) and its start-up
+    the board's ~34 datagrams a dense cloud, 10 a second, overflowed the
+    buffer -- the board's +~8,300 kernel "receive buffer errors" a dense run.
+    start() empties it in a thread instead, whatever the caller is doing;
+    poll() then only hands over the newest whole cloud."""
+
+    def __init__(self, port=BRAIN_CLOUD_PORT, host=HOST, rcvbuf=CLOUD_RCVBUF):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+        self.rcvbuf = _ask_rcvbuf(self.sock, rcvbuf)
+        # Less than half of what was asked: the kernel capped it (rmem_max).
+        self.rcvbuf_short = self.rcvbuf < rcvbuf // 2
         self.sock.bind((host, port))
         self.sock.setblocking(False)
-        self.cloud, self.dropped = None, 0
+        self.cloud, self.whole, self.dropped = None, 0, 0
         self._seq, self._parts = None, {}
+        self._stop = threading.Event()
+        self._thread = None
 
-    def poll(self):
-        while True:
+    def start(self):
+        """Receive in a thread from now on (see the class doc)."""
+        if self._thread is None:
+            self.sock.settimeout(0.1)            # blocking, so close() is noticed
+            self._thread = threading.Thread(target=self._run, name="cloudlink", daemon=True)
+            self._thread.start()
+        return self
+
+    def _run(self):
+        while not self._stop.is_set():
             try:
                 data, _ = self.sock.recvfrom(16384)
-            except (BlockingIOError, InterruptedError):
-                return self.cloud
-            if len(data) < CLOUD_HEAD.size:
+            except socket.timeout:
                 continue
-            magic, seq, i, n, stamp, t, count = CLOUD_HEAD.unpack_from(data)
-            if magic != MAGIC or len(data) != CLOUD_HEAD.size + 12 * count:
-                continue
-            if seq != self._seq:
-                if self._parts:
-                    self.dropped += 1
-                self._seq, self._parts = seq, {}
-            self._parts[i] = np.frombuffer(data, "<f4", offset=CLOUD_HEAD.size).reshape(-1, 3)
-            if len(self._parts) == n:
-                xyz = np.concatenate([self._parts[k] for k in range(n)])
-                self.cloud, self._parts = Cloud(seq, xyz, stamp, t), {}
+            except OSError:
+                return                           # closed under us
+            self._take(data)
+
+    def poll(self):
+        if self._thread is None:
+            while True:
+                try:
+                    data, _ = self.sock.recvfrom(16384)
+                except (BlockingIOError, InterruptedError):
+                    break
+                self._take(data)
+        return self.cloud
+
+    def _take(self, data):
+        if len(data) < CLOUD_HEAD.size:
+            return
+        magic, seq, i, n, stamp, t, count = CLOUD_HEAD.unpack_from(data)
+        if magic != MAGIC or len(data) != CLOUD_HEAD.size + 12 * count:
+            return
+        if seq != self._seq:
+            if self._parts:
+                self.dropped += 1
+            self._seq, self._parts = seq, {}
+        self._parts[i] = np.frombuffer(data, "<f4", offset=CLOUD_HEAD.size).reshape(-1, 3)
+        if len(self._parts) == n:
+            xyz = np.concatenate([self._parts[k] for k in range(n)])
+            # Replaced whole, never edited: the reader needs no lock.
+            self.cloud, self._parts = Cloud(seq, xyz, stamp, t), {}
+            self.whole += 1
+
+    def kernel_drops(self):
+        """Datagrams the kernel dropped here, buffer full; None off Linux."""
+        return udp_drops(self.sock)
+
+    def report(self):
+        k = self.kernel_drops()
+        return (f"clouds udp {self.sock.getsockname()[1]}: {self.whole} whole, "
+                f"{self.dropped} incomplete, kernel dropped "
+                f"{'n/a' if k is None else k} datagrams, rcvbuf {self.rcvbuf >> 10} KB"
+                + (" (CAPPED: raise net.core.rmem_max)" if self.rcvbuf_short else ""))
 
     def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
         self.sock.close()
 
 
