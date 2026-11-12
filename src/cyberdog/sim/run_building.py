@@ -3874,16 +3874,20 @@ def main():
           f"{o['crawl'] / FPS:.1f}s crawling, {o['stopped'] / FPS:.1f}s stopped, "
           f"least clearance ahead {o['min_clear']:.2f} m")
     # Ground truth, and the only line here the robot cannot flatter itself on.
+    # Except on the board: the twin is put where the board says the dog is,
+    # which with its odometry (POSE=lio) is off by that odometry's error. The
+    # world scores the truth itself there (go2_world/score.py, run_hil.sh).
+    where = " [on the board's pose]" if args.robot == "go2_board" else ""
     if h["ticks"]:
-        print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s touching {', '.join(sorted(h['boxes']))}")
+        print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s touching {', '.join(sorted(h['boxes']))}{where}")
     else:
-        print("collisions: none -- no part of the dog touched a wall or an obstacle")
+        print(f"collisions: none -- no part of the dog touched a wall or an obstacle{where}")
     hh = run.handler_hits
     if hh["ticks"]:
         print(f"HANDLER: {hh['ticks'] / FPS:.1f}s with the person on the handle touching "
-              f"{', '.join(sorted(hh['boxes']))}")
+              f"{', '.join(sorted(hh['boxes']))}{where}")
     else:
-        print("handler: none -- the person on the handle never touched a wall or an obstacle")
+        print(f"handler: none -- the person on the handle never touched a wall or an obstacle{where}")
     print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
     if hasattr(run.robot, "guarded_ticks"):          # --robot twin-board
         print(f"board guard (modelled) cut the command: {run.robot.guarded_ticks / FPS:.1f}s")
@@ -3932,6 +3936,12 @@ def main():
         if pd["near"]:
             print(f"CONTACT: {pd['near'] / FPS:.1f}s within {PED_NEAR} m of a person "
                   f"(closest {pd['min_d']:.2f} m)")
+        elif not args.pedestrians:
+            # Nobody in this run's own crowd to be near: on the board the people
+            # walk in go2_world, which scores them (run_hil.sh's "world truth").
+            print("contact: not scored here -- no people of its own"
+                  + (" (they are in go2_world: see its world truth)"
+                     if args.robot == "go2_board" else ""))
         else:
             print(f"contact: none -- closest it came to anybody was {pd['min_d']:.2f} m")
     if run.autolabel is not None:

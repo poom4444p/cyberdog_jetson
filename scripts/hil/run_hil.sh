@@ -10,7 +10,9 @@
 #   bash scripts/hil/run_hil.sh stop              stop the world here and the board and brain there
 #
 # Each run writes its logs to $OUT (output/hil/<time>-<what>) and ends with a
-# summary: the brain's outcome, and how regularly states and commands moved.
+# summary: the brain's outcome, how regularly states and commands moved, and
+# a route's truth from the world ("world truth:": collisions and people, on the
+# physics itself; go2_world/score.py).
 # The world, the LiDAR and the board are stopped at the end, or on Ctrl-C;
 # VAMOS is left up (it takes ~25 s to load): `onboard.sh stop all` there stops it.
 #
@@ -188,7 +190,15 @@ case "${1:-}" in
     grep -E "ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|help|planner" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
+    # The board first (it prints the odometry's error and how it stopped on its
+    # way out), then the world, which writes the run's truth as it goes
+    # (go2_world/score.py): what the dog touched and how near it came to people,
+    # on the real physics -- the brain scores only on the board's pose, and has
+    # no people of its own here. World first left the board without states.
+    on_board "$ONBOARD stop" > /dev/null 2>&1
     on_board "$ONBOARD log" | tail -n +3
+    stop_world
+    grep -E "^world: t=|^world truth:" "$OUT/world.log" | cut -c1-230
     if [ "$TRACK_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/tracks.jsonl" "$OUT/tracks.jsonl" \
             && echo "tracks: $OUT/tracks.jsonl" || echo "tracks: not copied"
