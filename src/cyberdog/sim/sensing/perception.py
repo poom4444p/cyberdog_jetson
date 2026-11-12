@@ -129,8 +129,14 @@ class LiveClearance:
         self.still = None               # ...the same, minus anything walking
         self.points = np.empty((0, 2))  # the unexplained returns, for drawing
         self._scan = None               # this tick's returns, for `exclude`
-        self.memory = {}                # (col, row) world cell -> sim time last seen
-        self.recent = None              # (edt, x0, y0) over `memory`
+        # (col, row) world cell -> sim time last seen, as a grid: `seen[r, c]`
+        # is cell (c + mc0, r + mr0), -inf never. A dict of cells was rebuilt
+        # in Python every tick, and beside the trolley's dense returns that
+        # was 70-130 ms a tick on the J4012 (HIL 11-12 13:36, 37.5 s a route).
+        # Made on the first remember(); see there for its extent.
+        self.seen = None
+        self.mc0 = self.mr0 = 0
+        self.recent = None              # (edt, x0, y0) over what is remembered
 
     def _static(self, x, y):
         """Vectorised static lookup. Outside the map reads as zero clearance."""
@@ -239,6 +245,15 @@ class LiveClearance:
         who stops is still a person, and remembering where they stood would
         leave a ghost the turn-easing steers the handle round. Call after
         `exclude`, once per scan."""
+        if self.seen is None:
+            # The map's box and WINDOW + 1 m round it, in the cells' own keys
+            # (int() of metres / res, as the dict had them). The dog is always
+            # inside the box, so a cell further out than WINDOW is never in
+            # the window below: dropping it changes nothing.
+            pad = int((WINDOW + 1.0) / self.res)
+            self.mc0 = int(self.ox / self.res) - pad
+            self.mr0 = int(self.oy / self.res) - pad
+            self.seen = np.full((self.H + 2 * pad, self.W + 2 * pad), -np.inf)
         if self._scan is not None:
             px, py, _, origin = self._scan
             keep = np.ones(len(px), dtype=bool)
@@ -251,19 +266,27 @@ class LiveClearance:
             # at all, and the person touched it (Gate D, --vamos, seed 1,
             # after remembering bare returns had fixed seed 4).
             px, py = self._shadowed(px[keep], py[keep], origin)
-            cells = np.unique(np.column_stack([(px / self.res).astype(int),
-                                               (py / self.res).astype(int)]), axis=0)
-            for c, r in cells:
-                self.memory[(int(c), int(r))] = now
-        self.memory = {k: t for k, t in self.memory.items() if now - t <= MEMORY_S}
+            c = (px / self.res).astype(int) - self.mc0
+            r = (py / self.res).astype(int) - self.mr0
+            ok = (r >= 0) & (r < self.seen.shape[0]) & (c >= 0) & (c < self.seen.shape[1])
+            self.seen[r[ok], c[ok]] = now
         self.recent = None
-        if not self.memory:
-            return
         x0, y0 = centre[0] - WINDOW, centre[1] - WINDOW
-        cells = np.array(list(self.memory), dtype=float)
-        c = ((cells[:, 0] + 0.5) * self.res - x0) / self.res
-        r = ((cells[:, 1] + 0.5) * self.res - y0) / self.res
-        c, r = c.astype(int), r.astype(int)
+        # Only the cells that can land in the window: keys a cell either side.
+        c_lo = max(int(x0 / self.res) - 2 - self.mc0, 0)
+        r_lo = max(int(y0 / self.res) - 2 - self.mr0, 0)
+        c_hi = min(int((x0 + 2 * WINDOW) / self.res) + 3 - self.mc0, self.seen.shape[1])
+        r_hi = min(int((y0 + 2 * WINDOW) / self.res) + 3 - self.mr0, self.seen.shape[0])
+        if c_lo >= c_hi or r_lo >= r_hi:
+            return
+        rr, cc = np.nonzero(now - self.seen[r_lo:r_hi, c_lo:c_hi] <= MEMORY_S)
+        if not len(rr):
+            return
+        # The dict's own sums, on the cells' keys, so the field is the same.
+        kc = (cc + c_lo + self.mc0).astype(float)
+        kr = (rr + r_lo + self.mr0).astype(float)
+        c = (((kc + 0.5) * self.res - x0) / self.res).astype(int)
+        r = (((kr + 0.5) * self.res - y0) / self.res).astype(int)
         ok = (r >= 0) & (r < self.n) & (c >= 0) & (c < self.n)
         if not ok.any():
             return
