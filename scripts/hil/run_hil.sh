@@ -35,8 +35,13 @@
 #   TRACE=1      the brain prints its commands
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
-#   POSE=lio     the board reports the Mid-360's odometry as the dog's pose instead of the
-#                world's true one (needs small_gicp in ~/go2env); its error is in the board log
+#   POSE         route: where the board's pose comes from              (lio)
+#                lio: the Mid-360's odometry (small_gicp + gyro, needs small_gicp in
+#                ~/go2env), as the real dog has it; its error vs the world is in the
+#                board log. sim: the world's true pose. walk always uses sim
+#   DENSE        route: the Mid-360 at a real unit's point rate (run_lidar --dense,
+#                ~20k points a sweep, not ~2k)   (1 with POSE=lio, else 0)
+#                lio on the sparse pattern drifted 4x more (11-12: 1.02 m vs 0.26 m max)
 #   LIO_RECORD=1 route: the board saves the raw Mid-360 frames, its IMU and the world's
 #                true pose (go2_board.record); copied to $OUT/lio/. With
 #                LIDAR_ARGS=--dense for the real unit's point rate
@@ -55,13 +60,14 @@ PY=${PY:-python}
 PEOPLE=${PEOPLE:-4}
 WORLD_ARGS=${WORLD_ARGS:-}
 LIDAR_ARGS=${LIDAR_ARGS:-}
+DENSE=${DENSE:-}
 VIEWER=${VIEWER:-0}
 RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
 CLOUD_LOG=${CLOUD_LOG:-0}
 LIO_RECORD=${LIO_RECORD:-0}
-POSE=${POSE:-sim}
+POSE=${POSE:-lio}
 LIO_DIR=lio_record                 # on the board, under ~
 ONBOARD="~/$REMOTE/scripts/hil/onboard.sh"
 BOARD_PY='. ~/go2env/bin/activate; python'
@@ -177,6 +183,23 @@ case "${1:-}" in
   route)
     dest=${2:?"route DEST [N]"}
     new_out route; check_clock
+    case "$POSE" in
+      lio) on_board "$BOARD_PY -c 'import small_gicp'" > /dev/null 2>&1 || {
+               echo "POSE=lio (the default): small_gicp is not in ~/go2env on the board"
+               echo "  install its wheel there (HANDOFF / scripts/hil/README.md), or run with POSE=sim"
+               exit 1; } ;;
+      sim) ;;
+      *) echo "POSE=$POSE: lio or sim"; exit 2 ;;
+    esac
+    # The odometry is only as good as the scan it matches: dense, as a real
+    # Mid-360 is, unless asked otherwise.
+    [ -z "$DENSE" ] && { [ "$POSE" = lio ] && DENSE=1 || DENSE=0; }
+    if [ "$DENSE" = 1 ]; then
+        case " $LIDAR_ARGS " in *" --dense "*) ;; *) LIDAR_ARGS="$LIDAR_ARGS --dense" ;; esac
+    elif [ "$POSE" = lio ]; then
+        echo "WARNING: POSE=lio on the sparse LiDAR pattern (DENSE=0): expect ~1 m of drift, not ~0.3"
+    fi
+    echo "pose: $POSE, LiDAR $([ "$DENSE" = 1 ] && echo dense || echo sparse)"
     trap stop_all EXIT
     start_world
     on_board "$ONBOARD vamos"

@@ -120,7 +120,14 @@ board on the J4012, which only a fall showed; one repo means one commit for both
   It ends `RESULT: walked` or `RESULT: FELL`. Run it first after any change to
   go2_board: it is what showed the board steering on states 0.3 s old.
 - **`route DEST`** (3-4 minutes): the whole route with the brain and VAMOS, e.g.
-  floor 1 to the server room on floor 3, with the lift and four people.
+  floor 1 to the server room on floor 3, with the lift and four people. The
+  board steers on its own odometry (`POSE=lio`, the default since 11-12:
+  small_gicp on the Mid-360's sweeps with the gyro's rotation, as the real dog
+  has to), not the world's true pose; `POSE=sim` for that. The route checks
+  small_gicp is on the board first. With lio the emulated Mid-360 runs dense
+  (`DENSE=1`, ~20k points a sweep, a real unit's rate; `DENSE=0` for the old
+  ~2k pattern): on the sparse one the odometry drifted 1.02 m against 0.26 m. Three lio routes before the switch (11-11,
+  11-12, 0 and 4 people) all arrived, at most 0.37 m off the truth.
 
 Both end with what `dds_gaps.py` saw on the board's side of the link:
 
@@ -134,7 +141,7 @@ own socket, it shows what is on the wire, not how fresh the states the board
 uses are: those need go2_board's own check (`tests/test_sim_bus.py`).
 
 A route then stops the board (its log's last lines: how it stopped, and with
-`POSE=lio` the odometry's error against the world's pose), then the world,
+`POSE=lio`, the default, the odometry's error against the world's pose), then the world,
 and prints the world's own score of the run, on the physics itself
 (go2_world's `score.py`):
 
