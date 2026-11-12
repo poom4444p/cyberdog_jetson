@@ -92,8 +92,21 @@ EXIT_TURN_MIN = math.radians(35)  # less than this off straight out: the leg tur
 EXIT_TURN_W = 0.5         # rad/s: the turn, scripted, slow enough to follow on a handle
 EXIT_SHIFT = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)   # m from WAIT_XY towards the way on
 STAIR_V = 0.25            # m/s along a flight: a tread at a time, a third of corridor pace
-REPLAN_EVERY = 20         # ticks between VLM calls when --vamos is on
-REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacle
+# VAMOS is asked back to back: as soon as an answer lands, from the newest
+# frame. It used to be asked on 20-tick boundaries (10 while blocked), and an
+# answer that landed between two of them waited for the next, ~0.5 s a cycle
+# on the J4012 (2.6 s a call). VAMOS watches all the time; there are no
+# event-only calls.
+#
+# How fast the dog may walk on VAMOS's word: a hazard only VAMOS can see (a
+# flat puddle; the LiDAR does not) can come into view just after a frame was
+# taken. The next frame is asked when the current answer lands, L later, and
+# its answer lands another L after that: 2 L from first in view to known.
+# In that time the dog must not walk past where it first saw it, less the
+# room to stop. VLM_SEE_D is an estimate (placeholder camera config).
+VLM_SEE_D = 2.0           # m ahead the camera sees a flat puddle
+VLM_STOP_D = 0.4          # m to stop from walking pace
+VLM_CAP_N = 5             # the cap goes on the slowest of the last this many answers
 # Shadow mode: a proposal whose heading is further than this off the map's
 # steering target is logged as the dream wanting to go somewhere else.
 SHADOW_DISAGREE = math.radians(15)
@@ -1170,7 +1183,12 @@ class Run:
         # The request in flight, if any: (tick it lands on, its paths, tick it
         # was asked on, body xy then). One at a time, as a GPU serves them.
         self.pending = None
-        self.vlm = {"asked": 0, "answers": 0, "dropped": 0, "age": 0.0, "moved": 0.0}
+        self.vlm = {"asked": 0, "answers": 0, "dropped": 0, "age": 0.0, "moved": 0.0,
+                    "cap_min": None}
+        # Robot time each call was asked at, and the last VLM_CAP_N latencies
+        # (asked to landed, s): what vlm_speed_cap goes on.
+        self.vlm_asked_t = None
+        self.vlm_lat = []
         # A robot on the wall clock (go2_board) cannot have the loop paused for
         # the call: the request runs on a worker thread and lands when it is
         # done. The twin keeps the repeatable sim-time release above.
@@ -1521,7 +1539,9 @@ class Run:
                 vamos_prompt(state), self.robot.camera_pose())
             self.pending = (self.vlm_worker, None, n, self.robot.get_pose()[:2])
             self.vlm["asked"] += 1
+            self.vlm_asked_t = self.robot.now()
             return
+        self.vlm_asked_t = self.robot.now()
         t0 = time.perf_counter()
         cam_pose = self.robot.camera_pose()
         paths = self.policy(floor).request(self.robot.get_image(),
@@ -1531,6 +1551,19 @@ class Run:
         self.pending = (n + int(round(wait / self.robot.CONTROL_DT)), paths,
                         n, self.robot.get_pose()[:2])
         self.vlm["asked"] += 1
+
+    def vlm_speed_cap(self):
+        """Fastest the dog may walk on VAMOS's word, m/s: see VLM_SEE_D.
+
+        (VLM_SEE_D - VLM_STOP_D) / 2 L, L the slowest of the last VLM_CAP_N
+        answers, or the expected latency (--vlm-latency, else VLM_LATENCY)
+        before any has landed. A slower VAMOS slows the dog with it.
+        """
+        lat = max(self.vlm_lat) if self.vlm_lat else (self.vlm_latency or VLM_LATENCY)
+        cap = (VLM_SEE_D - VLM_STOP_D) / (2.0 * max(lat, self.robot.CONTROL_DT))
+        if self.vlm["cap_min"] is None or cap < self.vlm["cap_min"]:
+            self.vlm["cap_min"] = cap
+        return cap
 
     def vlm_busy(self):
         """A call is still running on the worker, even one whose answer was
@@ -1554,6 +1587,9 @@ class Run:
         self.pending = None
         self.vlm["answers"] += 1
         self.vlm["age"] += (n - asked_at) * self.robot.CONTROL_DT
+        if self.vlm_asked_t is not None:
+            # Robot time, not ticks: on the board a slow tick would hide it.
+            self.vlm_lat = (self.vlm_lat + [self.robot.now() - self.vlm_asked_t])[-VLM_CAP_N:]
         self.vlm["moved"] += math.dist(xy0, pose[:2])
         return self.policy(floor).deliver(paths, pose, destination)
 
@@ -2761,6 +2797,8 @@ class Run:
             # Judged on the pace the dog really walks (Pace); the cap it
             # returns is in those terms, so it is scaled back up to a command.
             cruise = self.robot.MAX_V * self.router.behavior.query_actions(x, y)["speed_modifier"]
+            if self.vamos:
+                cruise = min(cruise, self.vlm_speed_cap())   # see VLM_SEE_D
             pace = self.pace.ratio
             follow_cap, pass_shift, lead = self.follow_lead(tracks, (x, y), yaw, waypoints, i,
                                                             gates, cruise * pace,
@@ -2959,13 +2997,10 @@ class Run:
                         moved["destination"] = aim
                         state = moved
 
-            # Ask again sooner while nothing has cleared: the view changes as
-            # the dog closes in, and a candidate that was not there at 4 m
-            # often is at 2 m.
-            # Asked on schedule, answered whenever the answer lands; the loop
-            # carries on either way. `asked` is an answer arriving this tick.
-            due = n % (REPLAN_BLOCKED if proposed is None else REPLAN_EVERY) == 0
-            if ((self.vamos or self.shadow) and state["state"] == "TRACK" and due
+            # Asked back to back (see VLM_SEE_D): as soon as the last answer
+            # has landed, from this tick's frame; the loop carries on either
+            # way. `asked` is an answer arriving this tick.
+            if ((self.vamos or self.shadow) and state["state"] == "TRACK"
                     and self.pending is None and not self.vlm_busy()):
                 self.ask_vamos(floor, n, state)
             answer = self.take_answer(floor, n, (x, y, yaw),
@@ -3861,6 +3896,11 @@ def main():
               f"dropped at a leg's end; answers were {v['age'] / k:.1f}s old on "
               f"arrival, the dog {v['moved'] / k:.2f} m on from where it asked; "
               f"the control loop never waited")
+        if args.vamos and v["cap_min"] is not None:
+            lat = max(run.vlm_lat) if run.vlm_lat else float("nan")
+            print(f"VLM SPEED CAP: {run.vlm_speed_cap():.2f} m/s at the end "
+                  f"(slowest of the last {len(run.vlm_lat)} answers {lat:.1f}s), "
+                  f"lowest {v['cap_min']:.2f} m/s; ({VLM_SEE_D} - {VLM_STOP_D}) m / 2 L")
     if run.shadow is not None:
         run.shadow.close()
         sn = run.shadow_n

@@ -35,14 +35,20 @@ class Robot:
     def get_pose(self):
         return (0.0, 0.0, 0.0)
 
+    def now(self):
+        return self.t
+
+    t = 0.0
+
 
 def stub():
     vamos = SlowVamos()
     run = types.SimpleNamespace(robot=Robot(), real_time=True, vlm_pool=None, vlm_worker=None,
                                 pending=None, vlm_latency=None, policy=lambda floor: vamos,
                                 vlm={"asked": 0, "answers": 0, "dropped": 0, "age": 0.0,
-                                     "moved": 0.0})
-    for name in ("ask_vamos", "take_answer", "vlm_busy"):
+                                     "moved": 0.0, "cap_min": None},
+                                vlm_asked_t=None, vlm_lat=[])
+    for name in ("ask_vamos", "take_answer", "vlm_busy", "vlm_speed_cap"):
         setattr(run, name, getattr(rb.Run, name).__get__(run))
     return run, vamos
 
@@ -81,3 +87,35 @@ def test_vlm_latency_option_takes_seconds_or_measured():
     assert rb.vlm_latency_arg("1.8") == 1.8
     assert rb.vlm_latency_arg("measured") is None
     assert 2.5 <= rb.VLM_LATENCY <= 3.2                  # HIL 11-11: 2.7-3.2 s
+
+
+def test_latency_is_measured_on_robot_time():
+    run, vamos = stub()
+    run.robot.t = 10.0
+    run.ask_vamos(1, 0, {"state": "TRACK", "loc": (500, 600), "destination": (5.0, 5.0)})
+    vamos.go.set()
+    run.vlm_worker.result(timeout=1.0)
+    run.robot.t = 12.6
+    assert run.take_answer(1, 30, (0, 0, 0), (5, 5)) is not None
+    assert len(run.vlm_lat) == 1 and abs(run.vlm_lat[0] - 2.6) < 1e-9
+    run.vlm_pool.shutdown()
+
+
+def test_speed_cap_follows_the_vamos_cycle():
+    run, _ = stub()
+    # Before any answer: the expected latency, here VLM_LATENCY (2.8 s).
+    assert abs(run.vlm_speed_cap() - 1.6 / 5.6) < 1e-9
+    run.vlm_lat = [2.6]                         # J4012 with the shared prefill
+    assert abs(run.vlm_speed_cap() - 1.6 / 5.2) < 1e-9      # ~0.31 m/s
+    run.vlm_lat = [2.6, 4.6]                    # one slow answer: the slowest counts
+    assert abs(run.vlm_speed_cap() - 1.6 / 9.2) < 1e-9
+    assert run.vlm["cap_min"] == run.vlm_speed_cap()
+    run.vlm_latency = 1.8                       # --vlm-latency is the default only
+    run.vlm_lat = []
+    assert abs(run.vlm_speed_cap() - 1.6 / 3.6) < 1e-9
+
+
+def test_vamos_is_asked_back_to_back():
+    # No tick schedule left: the only gate is a call already in flight.
+    assert not hasattr(rb, "REPLAN_EVERY") and not hasattr(rb, "REPLAN_BLOCKED")
+    assert rb.VLM_SEE_D - rb.VLM_STOP_D > 0

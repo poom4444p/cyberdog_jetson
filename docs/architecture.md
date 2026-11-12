@@ -218,7 +218,9 @@ Measured by `tests/selftest.py latency` on an M-series Mac:
 | CE-RRT\* plan (only with a person in the way) | ~15–40 ms | 100 ms (`ce_rrt.REPLAN_S`): 10 Hz, as the spec asks |
 | VAMOS call (real server, M-series `mps`) | ~1.6–1.8 s | spec: ≤ 2–3 s per plan |
 
-The control loop runs at 20 Hz; VAMOS is asked at 1 Hz, which is near its own
-receding-horizon rate. The rate drops to 2 Hz (`REPLAN_BLOCKED`) while nothing
-has cleared an obstacle, because the view changes as the dog closes in and a
-candidate that was not there at 4 m often is at 2 m.
+The control loop runs at 20 Hz; VAMOS is asked back to back, as soon as the
+last answer lands, from the newest frame (one call at a time, ~2.6 s on the
+J4012). Under `--vamos` the dog's pace is capped by that cycle: a hazard only
+VAMOS sees is known at worst 2 L after it comes into view, so
+`v <= (VLM_SEE_D - VLM_STOP_D) / 2 L` (2.0 m and 0.4 m, estimates; ~0.31 m/s
+at L = 2.6 s), L the slowest of the last few answers.
