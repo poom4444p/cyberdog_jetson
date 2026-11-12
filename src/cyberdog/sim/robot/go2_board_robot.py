@@ -231,7 +231,12 @@ class BoardTwinRobot(MujocoRobot):
         if clouds:
             from go2_board.lidar import BRAIN_CLOUD_PORT, CloudLink
             from go2_board.link import HOST
-            self.clouds = CloudLink(port=BRAIN_CLOUD_PORT, host=listen or HOST)
+            # Received in a thread: the brain reads clouds only while it
+            # walks, and a lift ride unread overflowed the socket (CloudLink).
+            self.clouds = CloudLink(port=BRAIN_CLOUD_PORT, host=listen or HOST).start()
+            if self.clouds.rcvbuf_short:
+                print(f"[udp] WARNING: cloud socket rcvbuf capped at "
+                      f"{self.clouds.rcvbuf >> 10} KB: raise net.core.rmem_max")
         x, y, yaw = self._wait_for_pose()
         super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
 
@@ -400,8 +405,17 @@ class BoardTwinRobot(MujocoRobot):
         return self._cloud_at
 
     def close(self):
+        # Which of the brain's sockets lost datagrams to a full buffer: the
+        # board's kernel counts them all together ("receive buffer errors").
+        from go2_board.livox import udp_drops
+        k = udp_drops(self.board.link.sock)
+        line = f"[udp] state udp {self.board.link.sock.getsockname()[1]}: kernel dropped " \
+               f"{'n/a' if k is None else k} datagrams"
+        if self.clouds is not None:
+            line += "; " + self.clouds.report()
+        print(line)
         self.board.close()
         if self.lift is not None:
             self.lift.close()
         if self.clouds is not None:
-            self.clouds.sock.close()
+            self.clouds.close()

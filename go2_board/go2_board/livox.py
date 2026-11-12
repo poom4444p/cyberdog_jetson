@@ -26,6 +26,7 @@ dot_num ns, which is what livox_ros_driver2 does.
 A point with no return is (0, 0, 0) on the wire; frames drop those unless
 asked to keep them. IMU acceleration is in g on the wire, gyro in rad/s.
 """
+import os
 import socket
 import struct
 import sys
@@ -225,6 +226,24 @@ def _ask_rcvbuf(sock, asked):
     got = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
     # Linux doubles what it reports; never count that as more than asked.
     return min(got // 2 if sys.platform.startswith("linux") else got, asked)
+
+
+def udp_drops(sock, path="/proc/net/udp"):
+    """Datagrams the kernel dropped on this socket because its receive buffer
+    was full (the `drops` column of /proc/net/udp, found by the socket's
+    inode), or None where there is no such file (macOS) or no such row.
+    The board's "receive buffer errors" counter is the sum of these."""
+    try:
+        ino = str(os.fstat(sock.fileno()).st_ino)
+        with open(path) as f:
+            next(f)                                   # the header
+            for line in f:
+                cols = line.split()
+                if len(cols) >= 13 and cols[9] == ino:
+                    return int(cols[12])
+    except (OSError, ValueError, StopIteration):
+        pass
+    return None
 
 
 def _socket(port, host, rcvbuf=RCVBUF):

@@ -1,6 +1,7 @@
 """Clearance, the velocity guard, clouds to the brain and the App with a LiDAR.
 No sensor: frames are built in the sensor frame from a known room."""
 import math
+import os
 import socket
 import time
 
@@ -182,6 +183,69 @@ def test_cloud_to_the_brain_whole_or_not_at_all():
     finally:
         li.stop()
         link.close()
+
+
+def _send_unread(link, port, clouds, pts=1500):
+    """Send `clouds` whole clouds while the caller never polls (a lift ride)."""
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for seq in range(1, clouds + 1):
+            for d in cloud_datagrams(seq, np.ones((pts, 3)), 0, float(seq)):
+                tx.sendto(d, ("127.0.0.1", port))
+            time.sleep(0.002)
+    finally:
+        tx.close()
+
+
+def test_cloud_thread_keeps_the_socket_empty_while_nobody_polls():
+    # A buffer far too small for 60 unread clouds: polled, most are lost;
+    # with the thread, every one arrives whole.
+    port = free_port()
+    link = CloudLink(port, rcvbuf=1 << 16).start()
+    try:
+        _send_unread(link, port, 60)
+        end = time.monotonic() + 2.0
+        while link.whole < 60 and time.monotonic() < end:
+            time.sleep(0.01)
+        c = link.poll()
+        assert link.whole == 60 and link.dropped == 0 and c.seq == 60
+        assert link.kernel_drops() in (0, None)
+        assert "60 whole" in link.report()
+    finally:
+        link.close()
+    assert not link._thread.is_alive()
+
+
+def test_cloud_unthreaded_overflows_when_not_polled():
+    # The old behaviour, kept for the board-side tests: what the thread fixes.
+    port = free_port()
+    link = CloudLink(port, rcvbuf=1 << 16)
+    try:
+        _send_unread(link, port, 60)
+        link.poll()
+        assert link.whole < 60
+    finally:
+        link.close()
+
+
+def test_udp_drops_reads_this_sockets_row(tmp_path):
+    from go2_board.livox import udp_drops
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        ino = os.fstat(s.fileno()).st_ino
+        head = "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt" \
+               "   uid  timeout inode ref pointer drops\n"
+        row = " {sl}: 0100007F:268{sl} 00000000:0000 07 00000000:00000000 00:00000000 00000000" \
+              "  1000        0 {ino} 2 0000000000000000 {drops}\n"
+        p = tmp_path / "udp"
+        p.write_text(head + row.format(sl=0, ino=ino + 1, drops=5)
+                     + row.format(sl=1, ino=ino, drops=8312))
+        assert udp_drops(s, p) == 8312
+        p.write_text(head + row.format(sl=0, ino=ino + 1, drops=5))
+        assert udp_drops(s, p) is None
+        assert udp_drops(s, tmp_path / "missing") is None
+    finally:
+        s.close()
 
 
 # -- in the App -----------------------------------------------------------------
