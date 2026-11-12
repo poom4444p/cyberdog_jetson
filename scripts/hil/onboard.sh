@@ -9,7 +9,7 @@
 #
 #   onboard.sh vamos                start VAMOS and wait until its model is loaded
 #   onboard.sh board                start board_main (limp until the brain asks)
-#   onboard.sh brain DEST [N]       run the brain to DEST, asking VAMOS for N paths (2)
+#   onboard.sh brain DEST [N]       run the brain to DEST, asking VAMOS for N paths (5)
 #   onboard.sh stop [all]           stop the brain and the board (all: VAMOS too)
 #   onboard.sh log                  board_main's log
 #   onboard.sh status               what is running, VAMOS, the clock
@@ -98,7 +98,7 @@ case "${1:-}" in
 
   brain)
     dest=${2:?"brain DEST [N]"}
-    samples=${3:-2}
+    samples=${3:-5}
     cd "$CYBERDOG" && . "$GO2ENV/bin/activate" || exit 1
     if [ "$TRACE" = 1 ]; then run=("$HERE/trace_run_building.py"); else run=(-m cyberdog.sim.run_building); fi
     tracklog=()
