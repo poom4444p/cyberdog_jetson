@@ -2494,10 +2494,10 @@ class Run:
                                    min(HANDLER_ROOM, self.handler_room(live, x, y, yaw)))
             s0, c0, n0, h0 = self.plan_floor
 
-            def ok(px, py, pyaw):
-                return (live.static_at(px, py) >= s0 and live.detected_at(px, py) >= c0
-                        and nose(px, py, pyaw) >= n0
-                        and self.handler_room(live, px, py, pyaw) >= h0)
+            # static_at >= s0, detected_at >= c0, nose() >= n0 and
+            # handler_room() >= h0, as one fast closure: a search asks it
+            # ~10-30 thousand times (LiveClearance.pose_test).
+            ok = live.pose_test(s0, c0, n0, h0, SWING_NOSE, HANDLER_BEHIND)
 
             near = min((math.dist((x, y), (p.x, p.y)) for p in people), default=INF)
             if near < ce_rrt.need(0.0):

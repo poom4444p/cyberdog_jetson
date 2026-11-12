@@ -344,6 +344,91 @@ class LiveClearance:
             return float(self.faces[r, c])
         return 0.0
 
+    def pose_test(self, s0, c0, n0, h0, nose, behind):
+        """ok(x, y, yaw) for CE-RRT*, the same answer as
+
+            static_at(x, y) >= s0 and detected_at(x, y) >= c0
+            and wall_at(<nose m ahead>) >= n0
+            and min(wall_at, detected_at, remembered_at)(<behind m behind>) >= h0
+
+        -- run_building.Run.go_round's rules, the last one Run.handler_room --
+        in one closure. A search asks it ~10-30 thousand times, and asked
+        through those methods it was most of a search: ~400 ms on the J4012
+        beside people (HIL 11-12 13:43). Same lookups, same arithmetic, so the
+        same answers (tests/test_pose_test.py), without the method calls, with
+        cos and sin once a pose and the grids read through memoryviews.
+
+        The fields are the ones there now: make a new one after update,
+        exclude or remember (go_round makes one a search)."""
+        res, ox, oy, H, W, n = self.res, self.ox, self.oy, self.H, self.W, self.n
+        top = H - 1
+        dist, faces = memoryview(self.dist), memoryview(self.faces)
+        # The window fields: (edt, x0, y0), or None when nothing is seen. A
+        # missing one, or a point outside it, reads INF.
+        st, sx0, sy0 = ((memoryview(self.still[0]),) + self.still[1:]
+                        if self.still is not None else (None, 0.0, 0.0))
+        rc, rx0, ry0 = ((memoryview(self.recent[0]),) + self.recent[1:]
+                        if self.recent is not None else (None, 0.0, 0.0))
+        cos, sin = math.cos, math.sin
+        c_out, h_out = INF >= c0, INF >= h0
+        s_out = 0.0 >= s0                    # off the map: no clearance
+
+        # Written out in full, no helpers or loops: this is the inner loop.
+        def ok(x, y, yaw):
+            # static_at(x, y) >= s0
+            c = int((x - ox) / res)
+            r = int(top - (y - oy) / res)
+            if 0 <= r < H and 0 <= c < W:
+                if not dist[r, c] >= s0:
+                    return False
+            elif not s_out:
+                return False
+            # detected_at(x, y) >= c0
+            if st is None:
+                if not c_out:
+                    return False
+            else:
+                c = int((x - sx0) / res)
+                r = int((y - sy0) / res)
+                if 0 <= r < n and 0 <= c < n:
+                    if not st[r, c] >= c0:
+                        return False
+                elif not c_out:
+                    return False
+            # wall_at(nose) >= n0
+            cs, sn = cos(yaw), sin(yaw)
+            fx, fy = x + nose * cs, y + nose * sn
+            c = int((fx - ox) / res)
+            r = int(top - (fy - oy) / res)
+            if not (faces[r, c] if 0 <= r < H and 0 <= c < W else 0.0) >= n0:
+                return False
+            # handler_room: wall_at, detected_at, remembered_at, each >= h0
+            hx, hy = x - behind * cs, y - behind * sn
+            c = int((hx - ox) / res)
+            r = int(top - (hy - oy) / res)
+            if not (faces[r, c] if 0 <= r < H and 0 <= c < W else 0.0) >= h0:
+                return False
+            if st is None:
+                if not h_out:
+                    return False
+            else:
+                c = int((hx - sx0) / res)
+                r = int((hy - sy0) / res)
+                if 0 <= r < n and 0 <= c < n:
+                    if not st[r, c] >= h0:
+                        return False
+                elif not h_out:
+                    return False
+            if rc is None:
+                return h_out
+            c = int((hx - rx0) / res)
+            r = int((hy - ry0) / res)
+            if 0 <= r < n and 0 <= c < n:
+                return rc[r, c] >= h0
+            return h_out
+
+        return ok
+
     def __call__(self, x, y):
         """Metres to the nearest no-go -- mapped or seen. Same shape as
         clearance_test()'s closure, which is why nothing downstream changed."""
