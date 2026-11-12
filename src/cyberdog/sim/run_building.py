@@ -101,6 +101,15 @@ STAIR_V = 0.25            # m/s along a flight: a tread at a time, a third of co
 # constraint rests on) and searches again this much later. In ticks, not on
 # the clock: the plans stay repeatable (ce_rrt's docstring, Gate D).
 PLAN_RETRY_S = 0.5
+# While a plan is being walked, a new one used to be searched for every
+# ce_rrt.REPLAN_S (0.1 s) whether or not the old one was still good: ~400 ms
+# a search on the J4012 (HIL 11-12 13:43: 16 searches in one going-round,
+# ~7 s, worst 741 ms). Now, inside this long of the last search, the plan is
+# only checked (ce_rrt.still_good, cheap) and kept if it passes; it is
+# searched for again when the check fails or this has passed. Safety is still
+# checked every REPLAN_S; only looking for a better plan slows to 2 Hz. In
+# ticks, like PLAN_RETRY_S, so plans stay repeatable.
+PLAN_HOLD_S = 0.5
 # VAMOS is asked back to back: as soon as an answer lands, from the newest
 # frame. It used to be asked on 20-tick boundaries (10 while blocked), and an
 # answer that landed between two of them waited for the next, ~0.5 s a cycle
@@ -1282,7 +1291,8 @@ class Run:
         self.ped = {"yields": 0, "waited": 0, "near": 0, "min_d": 99.0, "since": None}
         self.planner = planner         # "map": wait for people; "cerrt": go round
         self.plan = None               # the ce_rrt.Plan being walked, if any
-        self.plan_at = -1              # tick it was made
+        self.plan_at = -1              # tick it was made, or last checked and kept
+        self.searched_at = None        # tick of the last search: see PLAN_HOLD_S
         self.plan_failed = None        # tick the last search found nothing: see PLAN_RETRY_S
         self.plan_speed = 0            # index into ce_rrt.SPEEDS the next search tries
         self.plan_floor = None         # (static, crate, nose, handle) room this
@@ -1292,7 +1302,7 @@ class Run:
                                        # until it is reached, so each replan
                                        # aims where the last one did
         self.plans = {"rounds": 0, "made": 0, "none": 0, "ms": 0.0, "ticks": 0,
-                      "worst_ms": 0.0}
+                      "worst_ms": 0.0, "held": 0}
         self.why_wait = collections.Counter()  # why a wait was not a going-round
         self.gave_up = None       # (layer, why) when follow() ends a leg short
         self.evading = 0.0             # sideways m/s while stepping aside, or 0
@@ -2397,13 +2407,21 @@ class Run:
         return (self.plan is None and self.plan_failed is not None
                 and n - self.plan_failed < round(PLAN_RETRY_S * FPS))
 
+    def plan_hold(self, n):
+        """Tick n is inside PLAN_HOLD_S of the last search, with a plan being
+        walked: check that plan (ce_rrt.still_good) rather than search again."""
+        return (self.plan is not None and self.searched_at is not None
+                and n - self.searched_at < round(PLAN_HOLD_S * FPS))
+
     def go_round(self, live, tracks, pose, route, gates, n, speed, ignore=()):
         """(where to steer to go round people, or None to carry on as before;
         somebody to stand still for). --planner cerrt.
 
         Asked every tick; plans every ce_rrt.REPLAN_S while somebody's path
-        meets the dog's or a plan is being walked. A plan that cannot be made
-        again, and is no longer safe as it stands (ce_rrt.still_good), is
+        meets the dog's or a plan is being walked -- within PLAN_HOLD_S of the
+        last search, a plan being walked is only checked (still_good) and
+        kept, and searched for again only if the check fails. A plan that
+        cannot be made again, and is no longer safe as it stands (ce_rrt.still_good), is
         dropped there and then, and the dog falls back on the wait:
         the chance constraint only covers the next ce_rrt.COMMIT_T, and that
         promise rests on there being a fallback when the next plan fails.
@@ -2487,8 +2505,19 @@ class Run:
                 self.plan, self.no_plan = None, "too close"
                 return None, close
 
-            t0 = time.perf_counter()
             warm = ahead(self.plan.path, (x, y)) if self.plan else None
+            if self.plan_hold(n) and ce_rrt.still_good(
+                    (x, y, yaw), warm, ok, people, handler_behind=HANDLER_BEHIND,
+                    v=self.plan.v):
+                # Searched a moment ago and the plan is still safe against
+                # where everybody is predicted now: walk on, search again
+                # PLAN_HOLD_S after the last search (see PLAN_HOLD_S).
+                self.plan = self.plan._replace(path=[(x, y)] + list(warm[1:]))
+                self.plan_at = n
+                self.plans["held"] += 1
+                return self.walk_plan((x, y), close)
+
+            t0 = time.perf_counter()
             # One speed a search (see PLAN_RETRY_S); the next search after
             # one that found nothing tries the next speed.
             new = ce_rrt.plan((x, y, yaw), goal, ok, people, warm=warm,
@@ -2499,7 +2528,7 @@ class Run:
             ms = (time.perf_counter() - t0) * 1000
             self.plans["ms"] += ms
             self.plans["worst_ms"] = max(self.plans["worst_ms"], ms)
-            self.plan_at = n
+            self.plan_at = self.searched_at = n
             if new is None and self.plan is not None and ce_rrt.still_good(
                     (x, y, yaw), warm, ok, people, handler_behind=HANDLER_BEHIND,
                     v=self.plan.v):
@@ -2525,12 +2554,16 @@ class Run:
                          + f". Going round, to your {side}.")
                 self.waiting_for, self.waited, self.held_still = None, 0, 0
             self.plan = new
-        rest = ahead(self.plan.path, (x, y))
-        if len(rest) < 2 or math.dist((x, y), rest[-1]) < ce_rrt.GOAL_TOL:
+        return self.walk_plan((x, y), close)
+
+    def walk_plan(self, xy, close):
+        """go_round's answer while self.plan is walked from xy."""
+        rest = ahead(self.plan.path, xy)
+        if len(rest) < 2 or math.dist(xy, rest[-1]) < ce_rrt.GOAL_TOL:
             self.plan = None             # walked to its end: back on the route
             return None, close
         self.plans["ticks"] += 1
-        return path_target(rest, (x, y)), None
+        return path_target(rest, xy), None
 
     def mention_overtakers(self, behind, xy, yaw, speed=0.0):
         """Tell the person on the handle that somebody is passing close, and on
@@ -3995,7 +4028,8 @@ def main():
             print(f"planner: CE-RRT*, went round somebody {pl['rounds']} times, "
                   f"{pl['ticks'] / FPS:.1f}s on a plan; {tried} plans, "
                   f"{pl['none']} found nothing, "
-                  f"{pl['ms'] / max(tried, 1):.0f} ms each, worst {pl['worst_ms']:.0f} ms")
+                  f"{pl['ms'] / max(tried, 1):.0f} ms each, worst {pl['worst_ms']:.0f} ms; "
+                  f"{pl['held']} times kept the plan without a search")
             if run.evade["steps"]:
                 print(f"planner: stepped aside for somebody {run.evade['steps']} times, "
                       f"{run.evade['ticks'] / FPS:.1f}s stepping")
