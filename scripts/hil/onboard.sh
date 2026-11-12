@@ -39,7 +39,7 @@ set -u
 CYBERDOG=${CYBERDOG:-$HOME/cyberdog_jetson}
 GO2_BOARD=${GO2_BOARD:-$CYBERDOG/go2_board}
 GO2ENV=${GO2ENV:-$HOME/go2env}
-VAMOS_DIR=${VAMOS_DIR:-$HOME/vamos/server}
+VAMOS_DIR=${VAMOS_DIR:-$CYBERDOG/vendor/VAMOS/server}   # synced with the repo (run_hil.sh sync)
 VAMOS_ENV=${VAMOS_ENV:-$HOME/vamosenv}
 VAMOS_PORT=${VAMOS_PORT:-8009}
 IFACE=${IFACE:-l4tbr0}

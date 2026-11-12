@@ -158,8 +158,11 @@ case "${1:-}" in
     elif [ "${SYNC_YES:-0}" != 1 ]; then
         echo "not synced: no terminal to ask; SYNC_YES=1 to sync anyway"; exit 1
     fi
+    # Of vendor/VAMOS only the server goes: onboard.sh runs VAMOS from it, so the
+    # board's server is the one in this repo (it was a hand-kept copy in ~/vamos).
     rsync -a --exclude __pycache__ --exclude .pytest_cache --exclude '*.egg-info' --exclude .git \
-        --exclude /models --exclude /output --exclude /datasets --exclude /vendor/VAMOS \
+        --exclude /models --exclude /output --exclude /datasets \
+        --include '/vendor/VAMOS/server/***' --exclude '/vendor/VAMOS/*' \
         --exclude '*.docx' --exclude '*.pptx' --exclude /vamos_train.tgz \
         "$CYBERDOG/" "$BOARD:~/$REMOTE/" && echo "$(basename "$CYBERDOG") -> $BOARD:~/$REMOTE" ;;
 
