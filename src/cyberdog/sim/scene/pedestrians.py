@@ -302,6 +302,16 @@ class Walker:
             self._relax(dt)
             self._advance(self.speed * dt)
             return
+        # As the oblivious rule, first: nobody walks into the thing right in
+        # front of them. Without it a head-on walker with no room either side
+        # kept coming at 0.6 pace and walked to 0.19 m of a dog standing still
+        # by the floor-1 trolley (--pedestrians 3 --seed 2, 11-16).
+        if math.hypot(rx, ry) < NOTICE and -(rx * hx + ry * hy) > 0:
+            self.held += dt
+            if self.held >= GIVE_WAY:
+                self._step_round(-rx, -ry)
+            return
+        self.held = 0.0
         in_path = abs(lat) < PASS_ROOM and -PARTY_BACK < along
         facing = hx * ux + hy * uy            # +1 same way as the party, -1 head-on
         # The party's left, in world y: an `along` walker can only drift in y,

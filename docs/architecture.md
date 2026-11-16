@@ -240,6 +240,55 @@ for flat hazards the LiDAR cannot see -- the same as map-only. A fast floor
 check is what would let the dog walk at pace with that covered; until then,
 shadow is for the rig, not for walking with people.
 
+The floor guard (`src/cyberdog/sim/sensing/floor_guard.py`, `--floor-guard sim`)
+is that fast floor check, simulated: the twin has no water, so `--puddles N`
+places N puddles on each leg's route (on open floor, out of doorways, leaving
+0.9 m beside them), and the guard sees one when it would be in the camera's
+image, within `--fg-see` (2.0 m) of the lens and not behind a wall, answering
+`--fg-latency` (0.25 s) later, frames back to back, each puddle missed with
+`--fg-miss` per frame. Known puddles become LiDAR-like returns, so the dog
+goes round them as round a crate; the pace cap is the guard's own
+`(see - 0.4) / 2 L` (3.2 m/s at the defaults, so `MAX_V` rules) in place of
+VAMOS's. A real guard (a model on the camera image) replaces `FloorGuard.look`.
+Twin, server room from the HIL start, 2 puddles a leg, seeds 1-3: no guard
+63 s and both puddles walked into every time; guard 66-70 s, none walked
+into, each known 1.7-2.0 m before its edge (the same with a 30% miss rate per
+frame: at 0.25 s each puddle is in view for tens of frames). HIL (shadow,
+4 people): 96 s, 2/2 seen 2.1-2.2 m out, none walked into.
+Known puddles occupy ground without the LiDAR's SHADOW (`LiveClearance.update`'s
+`flat`): the camera sees the floor beyond a puddle, and a shadowed puddle
+closed the way round one. A puddle the guard has just found resets the
+detour's side, as a new obstacle does.
+
+The rules, for anything in the way: a way round -> go round and say so; no way
+round (checked) -> stop and say so; a person and no way round -> stop and ask
+them ("Excuse me, may we pass?", every `EXCUSE_S`). A dog going round
+something that walks under `PROGRESS_M` in `BLOCKED_S` says "I cannot get past
+this. Stopping here." and stops (it used to stand there silent). Stopped, it
+may not turn on the spot towards a wall with its user (`UNPIN_DT`), and a
+detour line may not cut a wall corner (`perception.SIDE_WALL`: it once aimed
+into a side-door recess and hit the jamb). `--puddle-at X,Y,R[,F]` places one
+exactly, for the blocked-way cases. On the HIL rig, `PUDDLES="X,Y,R[,F] ..."` (map
+frame) gives the brain each as `--puddle-at` and go2_world each as
+`--puddle=` (shifted by `GO2_WORLD_ORIGIN`), which draws them in `RECORD=1`'s
+video only: HIL 15:05 (`PUDDLES="30.5,8.9,0.34 42.1,9.0,0.48"`,
+`BRAIN_ARGS="--floor-guard sim"`, 4 people) arrived in 84 s, both puddles known
+~2.1 m out and gone round, no collision, closest person 1.00 m. Simulated people (`--crowd aware`, the
+default) now stop for a dog right in front of them, as the oblivious ones did:
+before, a head-on walker with no room either side walked to 0.19 m of a dog
+standing still (`--pedestrians 3 --seed 2`); Gate D's aware numbers predate this.
+
+Twin, server room from the HIL start, `--puddles 2 --pedestrians 3`, seeds
+1-6: all arrive, no puddle walked into, no collision, the user never on a
+wall; seed 1 has a walker passing the stopped dog at 0.54 m (`PED_NEAR` 0.55).
+Known limit: selftest's `room 201 (with people, stress test)` (`--crowd
+oblivious --planner map --seed 1`) now reports CONTACT, 0.35 m for 0.1 s on
+floor 2: the dog had stood still for over 3 s and an oblivious crosser walked
+past it. The run differs from before because `SIDE_WALL` turns down aims into
+the north door recess by room 201's cartons; `SIDE_WALL = 0` gives the old run
+tick for tick. Kept on the user's decision (2026-11-16): not cutting corners
+is the safer rule.
+
 Where a VAMOS call goes on the J4012 (25W caps the GPU at 408 MHz, so it
 reads memory at ~40 GB/s, not the module's ~102 GB/s; GPU ~99% busy, the CPU
 is not the limit -- a CUDA graph of the decode step saved ~1%): prefill (image

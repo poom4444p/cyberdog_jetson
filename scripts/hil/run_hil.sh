@@ -36,6 +36,11 @@
 #   VAMOS_MODE   route: shadow (default: VAMOS logged, the map drives, no VLM speed
 #                cap; its log copied to $OUT/shadow_log.jsonl) or steer (VAMOS steers,
 #                pace capped by its latency). See onboard.sh.
+#   BRAIN_ARGS   route: more run_building arguments, e.g. "--puddles 2 --floor-guard sim"
+#   PUDDLES      route: puddles at fixed places, "X,Y,R[,FLOOR] ..." in the MAP frame:
+#                the brain gets each as --puddle-at (add --floor-guard sim to
+#                BRAIN_ARGS for it to see them), the world as --puddle= (drawn in
+#                RECORD's video only), shifted by WORLD_ORIGIN
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
 #   POSE         route: where the board's pose comes from              (lio)
@@ -62,6 +67,8 @@ REMOTE=${REMOTE:-cyberdog_jetson}
 PY=${PY:-python}
 PEOPLE=${PEOPLE:-4}
 WORLD_ARGS=${WORLD_ARGS:-}
+PUDDLES=${PUDDLES:-}
+WORLD_ORIGIN="21.0 9.5"   # run_building.GO2_WORLD_ORIGIN: the map point the world's origin is
 LIDAR_ARGS=${LIDAR_ARGS:-}
 DENSE=${DENSE:-}
 VIEWER=${VIEWER:-0}
@@ -121,6 +128,12 @@ start_world() {
         echo "world: with the viewer (double-click the dog, then Ctrl+right double-click to follow it)"
     fi
     [ "$RECORD" = 1 ] && world+=(--record="$OUT/world.mp4")
+    local p
+    for p in $PUDDLES; do
+        # shellcheck disable=SC2086
+        world+=("--puddle=$(echo "$p" | awk -F, -v ox=${WORLD_ORIGIN% *} -v oy=${WORLD_ORIGIN#* } \
+            '{printf "%.3f,%.3f,%s%s", $1 - ox, $2 - oy, $3, (NF > 3 ? "," $4 : "")}')")
+    done
     (cd "$GO2_WORLD" || exit 1; nohup "${world[@]}" --people="$PEOPLE" \
         --lift-listen="$MAC_IP" $WORLD_ARGS "$MAC_IF" > "$OUT/world.log" 2>&1 < /dev/null &)
     for _ in $(seq 1 30); do grep -q "people walking" "$OUT/world.log" 2>/dev/null && break; sleep 0.5; done
@@ -216,8 +229,10 @@ case "${1:-}" in
         on_board "POSE=$POSE $ONBOARD board" | tail -1
     fi
     start_gaps
-    on_board "VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
-    grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|help|planner|\[udp\]" \
+    brain_args=${BRAIN_ARGS:-}
+    for p in $PUDDLES; do brain_args+=" --puddle-at $p"; done
+    on_board "BRAIN_ARGS='$brain_args' VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
     # The board first (it prints the odometry's error and how it stopped on its
