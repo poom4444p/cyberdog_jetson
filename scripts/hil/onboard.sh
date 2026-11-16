@@ -19,6 +19,11 @@
 #   VAMOS_DIR VAMOS_ENV VAMOS_PORT  the VAMOS server, its venv and port
 #   VAMOS_LOC_HEAD                  1 (default) = beam search over <loc> tokens + EOS only
 #                                   (vlm_server.py --loc_head; loc_head.py); 0 = generate()
+#   VAMOS_MODE                      shadow (default) = VAMOS is asked every frame and its
+#                                   paths logged ($CYBERDOG/output/shadow_log.jsonl), the
+#                                   map route drives, no VLM speed cap (up to MAX_V);
+#                                   steer = VAMOS steers (--vamos), pace capped by its
+#                                   latency (run_building.VLM_SEE_D, ~0.32 m/s on the J4012)
 #   IFACE                           DDS interface to the world (USB-C: l4tbr0)
 #   POLICY                          walking policy, relative to GO2_BOARD
 #   STALE_MS                        go limp after this long without a state. 200 for
@@ -45,6 +50,7 @@ VAMOS_DIR=${VAMOS_DIR:-$CYBERDOG/vendor/VAMOS/server}   # synced with the repo (
 VAMOS_ENV=${VAMOS_ENV:-$HOME/vamosenv}
 VAMOS_PORT=${VAMOS_PORT:-8009}
 VAMOS_LOC_HEAD=${VAMOS_LOC_HEAD:-1}
+VAMOS_MODE=${VAMOS_MODE:-shadow}
 IFACE=${IFACE:-l4tbr0}
 POLICY=${POLICY:-policies/go2_flat_v5}
 STALE_MS=${STALE_MS-200}
@@ -105,6 +111,13 @@ case "${1:-}" in
     samples=${3:-5}
     cd "$CYBERDOG" && . "$GO2ENV/bin/activate" || exit 1
     if [ "$TRACE" = 1 ]; then run=("$HERE/trace_run_building.py"); else run=(-m cyberdog.sim.run_building); fi
+    case "$VAMOS_MODE" in
+        shadow) mode=(--shadow --shadow-log "$CYBERDOG/output/shadow_log.jsonl")
+                mkdir -p "$CYBERDOG/output" ;;
+        steer)  mode=(--vamos) ;;
+        *)      echo "VAMOS_MODE: shadow or steer, not '$VAMOS_MODE'"; exit 1 ;;
+    esac
+    echo "VAMOS_MODE=$VAMOS_MODE"
     tracklog=()
     if [ "${TRACK_LOG:-0}" = 1 ]; then
         mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/tracks.jsonl"
@@ -117,7 +130,7 @@ case "${1:-}" in
     # MUJOCO_GL=egl: the camera view VAMOS is shown is rendered with no display
     # (23 ms a frame); on the dog it comes from a USB camera.
     MUJOCO_GL=egl exec taskset -c "$BRAIN_CORES" python -u "${run[@]}" "$dest" --robot go2_board \
-        --lift-host "$LIFT_HOST" --vamos --vamos-samples "$samples" --auto-confirm --no-video "${tracklog[@]}" ;;
+        --lift-host "$LIFT_HOST" "${mode[@]}" --vamos-samples "$samples" --auto-confirm --no-video "${tracklog[@]}" ;;
 
   stop)
     # [x]yz: matches the process, not a shell whose command line holds the pattern

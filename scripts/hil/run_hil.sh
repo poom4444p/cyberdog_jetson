@@ -33,6 +33,9 @@
 #   RECORD=1     go2_world records the run to $OUT/world.mp4 (offscreen, chase camera;
 #                needs go2_world's [record] extra in PY's environment)
 #   TRACE=1      the brain prints its commands
+#   VAMOS_MODE   route: shadow (default: VAMOS logged, the map drives, no VLM speed
+#                cap; its log copied to $OUT/shadow_log.jsonl) or steer (VAMOS steers,
+#                pace capped by its latency). See onboard.sh.
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
 #   POSE         route: where the board's pose comes from              (lio)
@@ -65,6 +68,7 @@ VIEWER=${VIEWER:-0}
 RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
+VAMOS_MODE=${VAMOS_MODE:-shadow}
 CLOUD_LOG=${CLOUD_LOG:-0}
 LIO_RECORD=${LIO_RECORD:-0}
 POSE=${POSE:-lio}
@@ -212,8 +216,8 @@ case "${1:-}" in
         on_board "POSE=$POSE $ONBOARD board" | tail -1
     fi
     start_gaps
-    on_board "TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
-    grep -E "ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|help|planner|\[udp\]" \
+    on_board "VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
     # The board first (it prints the odometry's error and how it stopped on its
@@ -232,6 +236,10 @@ case "${1:-}" in
     if [ "$CLOUD_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/clouds.npz" "$OUT/clouds.npz" \
             && echo "clouds: $OUT/clouds.npz" || echo "clouds: not copied"
+    fi
+    if [ "$VAMOS_MODE" = shadow ]; then
+        scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/shadow_log.jsonl" "$OUT/shadow_log.jsonl" \
+            && echo "shadow: $OUT/shadow_log.jsonl" || echo "shadow: not copied"
     fi
     if [ "$LIO_RECORD" = 1 ]; then
         on_board "$ONBOARD stop" > /dev/null 2>&1      # board_main writes its last chunk on exit
