@@ -226,6 +226,20 @@ VAMOS sees is known at worst 2 L after it comes into view, so
 `v <= (VLM_SEE_D - VLM_STOP_D) / 2 L` (2.0 m and 0.4 m, estimates; ~0.32 m/s
 at L = 2.45 s), L the slowest of the last few answers.
 
+On the HIL rig VAMOS runs in shadow by default (`VAMOS_MODE=shadow` in
+`scripts/hil/onboard.sh` / `run_hil.sh`; `steer` is `--vamos` as above). It is
+asked back to back as under `--vamos` and every answer is logged
+(`output/shadow_log.jsonl`, copied to the run's folder), but the map route,
+LiDAR and CE-RRT\* drive and there is no VLM speed cap, so the dog walks at up
+to `MAX_V` (0.8 m/s). Why: no speed-up of the model on the 25W J4012 brings the
+cap near walking pace (0.8 m/s needs L ~1.0 s; int8 + tensor cores reached
+~2.0 s), zero-shot VAMOS does not yet steer better than the map (see the
+comment above `on_vamos` in `run_building.py`), and the puddle it is there to
+see is untested (`VLM_SEE_D` is a guess). The cost: in shadow nothing watches
+for flat hazards the LiDAR cannot see -- the same as map-only. A fast floor
+check is what would let the dog walk at pace with that covered; until then,
+shadow is for the rig, not for walking with people.
+
 Where a VAMOS call goes on the J4012 (25W caps the GPU at 408 MHz, so it
 reads memory at ~40 GB/s, not the module's ~102 GB/s; GPU ~99% busy, the CPU
 is not the limit -- a CUDA graph of the decode step saved ~1%): prefill (image
