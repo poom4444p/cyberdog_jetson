@@ -22,6 +22,7 @@ import base64
 from typing import List, Optional, Dict, Any
 import logging
 import asyncio
+import threading
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +67,10 @@ steering_instructions = ""
 # CyberDog: see install_shared_prefill. --no_shared_prefill turns it off.
 shared_prefill = True
 shared_prefill_calls = 0
+# CyberDog: see loc_head.py. --loc_head scores only <loc> tokens + EOS.
+loc_head = False
+loc_decoder = None
+loc_head_lock = threading.Lock()   # one request at a time through the decoder
 return_trajectories = False
 latest_image = {"content": None, "content_type": None}
 text_coordinates = ""
@@ -309,6 +314,27 @@ def load_model(model_path, use_fp32=False, trust_remote_code=True):
         
         return False, f"Error loading model: {str(e)}"
 
+def loc_head_generate(model_input, max_tokens, num_beams, num_samples):
+    """Beam search through LocHeadDecoder; None -> the caller uses generate().
+
+    Any failure turns --loc_head off for good (traceback in the log).
+    """
+    global loc_decoder, loc_head
+    with loc_head_lock:
+        try:
+            from loc_head import LocHeadDecoder
+            if (loc_decoder is None or loc_decoder.model is not model
+                    or loc_decoder.num_beams != num_beams):
+                loc_decoder = LocHeadDecoder(model, processor.tokenizer, num_beams=num_beams)
+            return loc_decoder.generate(model_input, max_new_tokens=max_tokens,
+                                        num_return_sequences=num_samples)
+        except Exception:
+            logger.exception("loc head failed; using generate() from now on")
+            loc_decoder = None
+            loc_head = False
+            return None
+
+
 def generate_trajectories(image, text_prompt, max_tokens, temperature, top_k, num_beams, num_samples):
     """Generate trajectories for a given prompt"""
     global model, processor, device, steering_instructions
@@ -352,15 +378,20 @@ def generate_trajectories(image, text_prompt, max_tokens, temperature, top_k, nu
                 
             shared_before = shared_prefill_calls
             t_gen = time.perf_counter()
-            outputs = model.generate(
-                **model_input,
-                **generation_kwargs
-            )
+            outputs = None
+            if loc_head and num_beams > 1 and temperature == 0 and num_samples <= num_beams:
+                outputs = loc_head_generate(model_input, max_tokens, num_beams, num_samples)
+                how = "loc head"
+            if outputs is None:
+                outputs = model.generate(
+                    **model_input,
+                    **generation_kwargs
+                )
+                how = "shared" if shared_prefill_calls > shared_before else "per row"
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             logger.info(f"generate: {(time.perf_counter() - t_gen) * 1000:.0f} ms, beams {num_beams}, "
-                        f"samples {num_samples}, prefill "
-                        f"{'shared' if shared_prefill_calls > shared_before else 'per row'}")
+                        f"samples {num_samples}, prefill {how}")
     except Exception as e:
         error_message = f"Error during model generation: {str(e)}"
         logger.error(error_message)
@@ -817,9 +848,13 @@ if __name__ == "__main__":
     parser.add_argument("--max_requests", type=int, default=0,
                         help="Exit after this many requests, for a supervisor to restart "
                              "(0 = never, the default)")
+    parser.add_argument("--loc_head", action="store_true",
+                        help="Beam search over <loc> tokens + EOS only (loc_head.py): "
+                             "skips 256k of the head's rows and their softmax/topk")
     
     args = parser.parse_args()
     shared_prefill = not args.no_shared_prefill
+    loc_head = args.loc_head
     
     # Use environment variables with fallbacks (like NaVILA server)
     host = args.host or os.environ.get("BIND_HOST", "0.0.0.0")

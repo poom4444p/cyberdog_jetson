@@ -17,6 +17,8 @@
 # Settings (environment, defaults for the rig as set up on the J4012):
 #   CYBERDOG GO2_BOARD GO2ENV       this repo, go2_board/ in it, and their venv
 #   VAMOS_DIR VAMOS_ENV VAMOS_PORT  the VAMOS server, its venv and port
+#   VAMOS_LOC_HEAD                  1 (default) = beam search over <loc> tokens + EOS only
+#                                   (vlm_server.py --loc_head; loc_head.py); 0 = generate()
 #   IFACE                           DDS interface to the world (USB-C: l4tbr0)
 #   POLICY                          walking policy, relative to GO2_BOARD
 #   STALE_MS                        go limp after this long without a state. 200 for
@@ -42,6 +44,7 @@ GO2ENV=${GO2ENV:-$HOME/go2env}
 VAMOS_DIR=${VAMOS_DIR:-$CYBERDOG/vendor/VAMOS/server}   # synced with the repo (run_hil.sh sync)
 VAMOS_ENV=${VAMOS_ENV:-$HOME/vamosenv}
 VAMOS_PORT=${VAMOS_PORT:-8009}
+VAMOS_LOC_HEAD=${VAMOS_LOC_HEAD:-1}
 IFACE=${IFACE:-l4tbr0}
 POLICY=${POLICY:-policies/go2_flat_v5}
 STALE_MS=${STALE_MS-200}
@@ -69,7 +72,8 @@ case "${1:-}" in
     # the ssh that started it never returns.
     (cd "$VAMOS_DIR" || exit 1; . "$VAMOS_ENV/bin/activate"
      HF_HUB_OFFLINE=1 nohup taskset -c "$BRAIN_CORES" python vlm_server.py --host 127.0.0.1 \
-         --port "$VAMOS_PORT" --model_path mateoguaman/vamos > "$VAMOS_LOG" 2>&1 < /dev/null &)
+         --port "$VAMOS_PORT" --model_path mateoguaman/vamos \
+         $([ "$VAMOS_LOC_HEAD" = 1 ] && echo --loc_head) > "$VAMOS_LOG" 2>&1 < /dev/null &)
     for _ in $(seq 1 120); do
         vamos_up && { echo "VAMOS: up"; exit 0; }
         sleep 2

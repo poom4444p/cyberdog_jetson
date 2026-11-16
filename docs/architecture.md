@@ -217,10 +217,24 @@ Measured by `tests/selftest.py latency` on an M-series Mac:
 | Static clearance field (once per floor) | ~125 ms | cached — cannot be rebuilt per tick |
 | CE-RRT\* plan (only with a person in the way) | ~15–40 ms | 100 ms (`ce_rrt.REPLAN_S`): 10 Hz, as the spec asks |
 | VAMOS call (real server, M-series `mps`) | ~1.6–1.8 s | spec: ≤ 2–3 s per plan |
+| VAMOS call (J4012, 25W, bf16, 5 beams, `--loc_head`) | ~2.3 s (`generate()`: 2.8 s) | spec: ≤ 2–3 s per plan; ≥ 0.5 Hz (≤ 2 s) not yet met |
 
 The control loop runs at 20 Hz; VAMOS is asked back to back, as soon as the
-last answer lands, from the newest frame (one call at a time, ~2.6 s on the
-J4012). Under `--vamos` the dog's pace is capped by that cycle: a hazard only
+last answer lands, from the newest frame (one call at a time, ~2.45 s on the
+J4012 with `--loc_head`). Under `--vamos` the dog's pace is capped by that cycle: a hazard only
 VAMOS sees is known at worst 2 L after it comes into view, so
-`v <= (VLM_SEE_D - VLM_STOP_D) / 2 L` (2.0 m and 0.4 m, estimates; ~0.31 m/s
-at L = 2.6 s), L the slowest of the last few answers.
+`v <= (VLM_SEE_D - VLM_STOP_D) / 2 L` (2.0 m and 0.4 m, estimates; ~0.32 m/s
+at L = 2.45 s), L the slowest of the last few answers.
+
+Where a VAMOS call goes on the J4012 (25W caps the GPU at 408 MHz, so it
+reads memory at ~40 GB/s, not the module's ~102 GB/s; GPU ~99% busy, the CPU
+is not the limit -- a CUDA graph of the decode step saved ~1%): prefill (image
++ prompt, once, shared by the 5 beams) ~0.67 s, then 10 decode steps (10
+`<loc>` tokens + EOS) at ~150-177 ms, each reading the 5.2 GB of weights once.
+`--loc_head` (`vendor/VAMOS/server/loc_head.py`, on by default in
+`scripts/hil/onboard.sh`, `VAMOS_LOC_HEAD=0` for `generate()`) scores only the
+1,025 tokens VAMOS answers with instead of all 257,216: it skips most of the
+output head (1.2 GB of the weights) and beam search's softmax/top-k over 5 x
+257k scores. 2.80 -> 2.30 s a call; the top path is the same as
+`generate()`'s in 32/32 test cases (all 5 paths in 31/32: near-tied lower
+beams can swap, since the softmax is over the 1,025 tokens only).
