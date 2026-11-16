@@ -31,6 +31,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import struct
 import sys
 import time
@@ -57,6 +58,7 @@ from cyberdog.sim.robot.mujoco_robot import MujocoRobot
 from cyberdog.sim.robot.go2_board_robot import BoardStopped
 from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
+from cyberdog.sim.sensing import floor_guard as fguard
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
@@ -165,6 +167,15 @@ DETOUR = 0.70             # ...and while actually stepping around something
 # What is left is the honest emergency: ROBOT_R, the distance at which the dog
 # is touching something rather than approaching it.
 BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
+# Going round something and getting nowhere, which is not the same as being
+# stopped: the detour had an aim, the dog was told to walk it, and something
+# downstream held it still. Beside a puddle that left 0.5 m one side and 0.8 m
+# the other it stood 280 s without a word (twin, floor guard, seed 1, 11-16).
+# A person waiting on the handle cannot see that; after BLOCKED_S of it the
+# dog says so and stops, as when no way past was found at all.
+PROGRESS_M = 0.20         # m the dog must move in BLOCKED_S while going round something
+EXCUSE = "Excuse me, may we pass?"
+EXCUSE_S = 6.0            # s between asking a person in the way to let us by
 # Run.respect_board: a robot with its own LiDAR guard (go2_board). Free
 # distance ahead, as the board measures it, under which pushing on is pointless
 # (the guard stops at 0.30 m and crawls below 1 m), the free distance that ends
@@ -784,6 +795,7 @@ NOSE_MIN = 0.15           # metres from the dog's front (SWING_NOSE ahead) to
                           # seed 8 again, centre 0.25 m clear of the cart, front
                           # 0.10 m, walking on at 0.6 m/s while turning.
 NOSE_HALF_W = 0.15        # metres either side of the centreline, the front legs
+UNPIN_DT = 0.3            # s of a turn on the spot judged ahead (as unpin)
 UNPIN_W = 0.4             # rad/s: the only turn allowed while waiting for somebody,
                           # and only to take the person on the handle off a wall.
                           # Frozen mid-pivot to wait, the dog held its user 8 cm
@@ -1163,7 +1175,9 @@ class Run:
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
                  vamos_samples=5,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
-                 track_log=None, robot=None, cloud_log=None):
+                 track_log=None, robot=None, cloud_log=None, puddles=0, puddle_at=(),
+                 floor_guard=None, fg_latency=fguard.LATENCY, fg_see=fguard.SEE_D,
+                 fg_miss=0.0):
         self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                           start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -1314,6 +1328,19 @@ class Run:
         self.cloud_log, self.clouds = cloud_log, []
         self.no_plan = None                    # ...this tick's reason, for yield_to
         self.place_crowd()
+        # Puddles (--puddles N a leg): flat, so the LiDAR does not see them;
+        # only the floor guard does (--floor-guard sim). With puddles and no
+        # guard they are still placed and scored: that is the baseline.
+        self.puddle_n = puddles
+        self.fg_on = floor_guard == "sim"
+        self.fg = (fguard.FloorGuard(self.cam, self.robot.CONTROL_DT, see_d=fg_see,
+                                     latency=fg_latency, p_miss=fg_miss, seed=seed)
+                   if (puddles or puddle_at or self.fg_on) else None)
+        for spec in puddle_at:
+            v = [float(t) for t in spec.split(",")]
+            self.fg.add([fguard.Puddle(self.fg.next_id(), int(v[3]) if len(v) > 3 else 1,
+                                       v[0], v[1], v[2])])
+        self.puddle_rng = random.Random(1000 + seed)
 
         if out is not None:
             import imageio
@@ -1344,6 +1371,13 @@ class Run:
         # difference between the crate it went round and the person it did not.
         if len(self.movers):
             draw_points(dog, self.movers, pose, self.cam, colour=(70, 160, 255), r=3)
+        # Puddles: a ring at the edge, dim until the floor guard knows of it.
+        for p in self.puddles_here():
+            ring = [(p.x + p.r * math.cos(a), p.y + p.r * math.sin(a))
+                    for a in np.linspace(0.0, 2 * math.pi, 24, endpoint=False)]
+            known = p.id in self.fg.known
+            draw_points(dog, ring, pose, self.cam,
+                        colour=(60, 220, 255) if known else (40, 80, 150), r=2 if known else 1)
         for c in candidates:
             draw_path(dog, c, pose, self.cam, (120, 120, 130))
         if chosen:
@@ -1369,10 +1403,34 @@ class Run:
             self.chase.azimuth, self.chase.distance, self.chase.elevation = \
                 math.degrees(yaw) + (0 if self.behind else 180), CHASE_D, CHASE_EL
         self.outside.update_scene(self.robot.data, self.chase)
+        self.draw_puddles(self.outside.scene)
         left = np.ascontiguousarray(self.outside.render())
         self.floor_tag(left)
         self.name_tag(left, x, y)
         self.writer.append_data(np.hstack([left, dog]))
+
+    def puddles_here(self):
+        """The placed puddles on the floor the dog is on (for drawing)."""
+        if self.fg is None:
+            return []
+        return [p for p in self.fg.puddles if p.floor == self.floor]
+
+    def draw_puddles(self, scn):
+        """Puddles into the chase camera's scene: they are on no model (the
+        LiDAR must not see them), so they are drawn as thin discs, blue until
+        the floor guard knows of one, then bright."""
+        import mujoco
+        z = levels.floor_z(self.floor) + 0.004
+        for p in self.puddles_here():
+            if scn.ngeom >= scn.maxgeom:
+                break
+            known = p.id in self.fg.known
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_CYLINDER,
+                                np.array([p.r, 0.003, 0.0]), np.array([p.x, p.y, z]),
+                                np.eye(3).flatten(),
+                                np.array([0.2, 0.85, 1.0, 0.9] if known else [0.15, 0.3, 0.7, 0.6],
+                                         dtype=np.float32))
+            scn.ngeom += 1
 
     def doors(self, floor):
         """(name, sign_xy) for every named place on one floor, cached.
@@ -2331,6 +2389,8 @@ class Run:
             if d - min(held.r, 0.4) < CLEAR_R and self.held_still < PATIENCE * FPS:
                 self.waited += 1
                 self.ped["waited"] += 1
+                if self.waited % int(EXCUSE_S * FPS) == 0:
+                    self.say(EXCUSE)
                 return held
             if self.held_still >= PATIENCE * FPS:
                 # Not "they have stopped": the track can be a person who has
@@ -2363,6 +2423,9 @@ class Run:
             # and cannot see it.
             self.say(describe_person(xy, yaw, (person.x, person.y),
                                      (person.vx, person.vy)) + ". Waiting.")
+            # No way round them (the planner found none, or this is not the
+            # planner's case): stop, and ask -- the person in the way can hear.
+            self.say(EXCUSE)
         self.waiting_for = person
         self.waited += 1
         self.ped["waited"] += 1
@@ -2801,17 +2864,38 @@ class Run:
         i = 1 if len(waypoints) > 1 else 0
         said = set()
         gates = self.router.gates(floor, waypoints)
+        if self.fg is not None:
+            self.fg.drop_pending()
+            if self.puddle_n:
+                # Every door on the floor, not only the route's own: a side
+                # door also reads as open floor beside a puddle.
+                doors = [tuple(e.get("door_xy") or e["xy"])
+                         for entries in self.router.locations.values()
+                         for e in entries if e["floor"] == floor]
+                placed = fguard.place_puddles(
+                    self.puddle_n, floor, waypoints, self.clearance(floor)._static,
+                    self.puddle_rng, first_id=self.fg.next_id(),
+                    near_door=lambda xy: (self.door_near(gates, xy, fguard.PUDDLE_DOOR)
+                                          or any(math.hypot(xy[0] - d[0], xy[1] - d[1])
+                                                 < fguard.PUDDLE_DOOR for d in doors)))
+                self.fg.add(placed)
+                if verbose and placed:
+                    print("  puddles: " + ", ".join(f"({p.x:.1f}, {p.y:.1f}) r {p.r:.2f}"
+                                                   for p in placed))
         # `proposed` is what VAMOS last offered and the gate let through;
         # `chosen` is what steers -- the same thing under --vamos, never
         # anything under --shadow.
         proposed, chosen, candidates, safety = None, None, [], 1.0
         hunting = halted = False
         stalled = no_goal = unseen = 0
+        progress = None           # (x, y, tick) the last time the dog had moved PROGRESS_M
         lean = 0.0                # the side of a detour once it is committed
         held, against = None, 0   # its last aim, and ticks the other side was offered
 
         for n in range(MAX_TICKS):
             x, y, yaw = self.robot.get_pose()
+            if progress is None or math.hypot(x - progress[0], y - progress[1]) > PROGRESS_M:
+                progress = (x, y, n)
 
             # Before anything else: is this a place the dog must not be? The
             # planner routes around the stairwells, so reaching one means a
@@ -2838,11 +2922,23 @@ class Run:
             self.step_crowd()
             live = self.clearance(floor)
             scan = self.robot.get_scan()
+            fresh = False             # the floor guard found a new puddle this tick
+            if self.fg_on:
+                # The floor guard's answers, kept off as flat ground: see
+                # floor_guard.returns and LiveClearance.update(flat=).
+                for p in self.fg.tick(n, floor, self.robot.camera_pose(), (x, y), live._static):
+                    print(f"  floor guard: puddle at ({p.x:.1f}, {p.y:.1f}), "
+                          f"{self.fg.known_at[p.id]:.2f} m off its edge")
+                    self.say("Wet floor ahead.")
+                    fresh = True
             if self.cloud_log and n % CLOUD_EVERY == 0:
                 # meta: t, floor, x, y, yaw, floor z -- see Run.close
                 self.clouds.append(((self.robot.now(), floor, x, y, yaw, self.robot.z),
                                     np.asarray(scan, np.float32).reshape(-1, 3)))
-            live.update(scan, self.robot.z, (x, y), origin=(x, y, self.robot.z + MOUNT_H))
+            flat = (self.fg.returns(floor, self.robot.z, (x, y), perception.WINDOW)[:, :2]
+                    if self.fg_on and self.fg.known else None)
+            live.update(scan, self.robot.z, (x, y), origin=(x, y, self.robot.z + MOUNT_H),
+                        flat=flat)
             if self.elev is not None:
                 self.elev.add(scan, (x, y), self.robot.z)
             self.seen = live.points
@@ -2859,7 +2955,10 @@ class Run:
             # Judged on the pace the dog really walks (Pace); the cap it
             # returns is in those terms, so it is scaled back up to a command.
             cruise = self.robot.MAX_V * self.router.behavior.query_actions(x, y)["speed_modifier"]
-            if self.vamos:
+            if self.fg_on:
+                # The guard watches the floor now, at its own pace: see floor_guard.
+                cruise = min(cruise, self.fg.cap())
+            elif self.vamos:
                 cruise = min(cruise, self.vlm_speed_cap())   # see VLM_SEE_D
             pace = self.pace.ratio
             follow_cap, pass_shift, lead = self.follow_lead(tracks, (x, y), yaw, waypoints, i,
@@ -2907,6 +3006,8 @@ class Run:
                           self.robot.now(), (x, y))
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
+            if self.fg is not None:
+                self.fg.score(floor, (x, y))
             self.score_handler(floor)
             self.score_people(floor, x, y)
 
@@ -3198,9 +3299,14 @@ class Run:
             # And so does the safety factor: a path the dog only just believes
             # it can walk is walked at half pace.
             unseen = 0 if len(live.points) else unseen + 1
-            if unseen == int(GONE_S * FPS):
+            if unseen == int(GONE_S * FPS) or fresh:
                 # Nothing in sight any more: next time is a new obstacle and
-                # deserves to be announced again, and gets its own side.
+                # deserves to be announced again, and gets its own side. So
+                # does a puddle the guard has just found, though something is
+                # in sight: with people about, `unseen` never ran out, and the
+                # side kept from the last thing gone round sent the dog down
+                # the 0.4 m side of a puddle with 0.65 m on the other
+                # (--pedestrians 3 --seed 2 --puddles 2, 11-16).
                 hunting = halted = False
                 stalled = lean = against = 0
                 held = None
@@ -3217,6 +3323,15 @@ class Run:
                 hunting = True
                 self.say("Something ahead. Stepping around it to your "
                          f"{'left' if offset > 0 else 'right'}.")
+            if (self.waiting_for is not None or self.narrow_waited > 0 or not hunting
+                    or self.plan is not None):
+                progress = (x, y, n)         # waiting for somebody is not getting nowhere
+            elif n - progress[2] > BLOCKED_S * FPS:
+                self.robot.set_velocity(0.0, 0.0, 0.0)
+                self.say("I cannot get past this. Stopping here.")
+                self.gave_up = ("perception", f"going round something at ({x:.1f}, {y:.1f}) "
+                                f"and under {PROGRESS_M} m walked in {BLOCKED_S:.0f} s")
+                return False, n
             if touching:
                 # Unconditional, and above everything else. This used to live
                 # only in the branch below, so a dog on a detour had no
@@ -3306,6 +3421,12 @@ class Run:
 
             if narrow_hold:
                 speed = 0.0                       # before a narrow way: see NARROW_WAIT_S
+                # Waiting, so as for a person: no turning, except to stop
+                # pressing the user into a wall. Stood here 4.5 s at -23 deg
+                # beside the floor-1 trolley with them on the north wall
+                # (--pedestrians 3 --seed 2, 11-16).
+                if self.handler_room(live, x, y, yaw) < HANDLER_ROOM:
+                    err = self.unpin(live, (x, y, yaw)) / K_W
             elif narrow_go:
                 # through it, lined up; slowly while not yet (ALIGN_GATE)
                 speed = min(speed, ALIGN_SLOW_V if narrow_slow else PASS_V)
@@ -3316,6 +3437,16 @@ class Run:
             if speed > 0.0:
                 people = [t for t in tracks if t.moving or MIN_RADIUS <= t.r <= MAX_RADIUS]
                 cmd = self.spare_handler(live, (x, y, yaw), cmd, speed, people)
+            elif cmd[2]:
+                # Stopped on purpose (no way past, waiting) and turning on the
+                # spot: not into a wall with the user. spare_handler only
+                # judged walking commands, and a dog stopped by the floor-1
+                # trolley turned to -33 deg after its aim, holding its user on
+                # the north wall for 4.5 s (--pedestrians 3 --seed 2, 11-16).
+                room = self.handler_room(live, x, y, yaw)
+                after = self.handler_room(live, x, y, yaw + cmd[2] * UNPIN_DT)
+                if after < HANDLER_ROOM and after < room:
+                    cmd = (cmd[0], cmd[1], 0.0)
             if self.planner == "cerrt" and person is not None:
                 side = self.step_aside(live, tracks, (x, y, yaw))
                 if side:
@@ -3729,6 +3860,22 @@ def main():
                          "they are on no map, and the dog stops for them")
     ap.add_argument("--seed", type=int, default=0,
                     help="which crowd -- the same seed is the same people every run")
+    ap.add_argument("--puddles", type=int, default=0, metavar="N",
+                    help="N puddles on each leg's route (on no map; the LiDAR does not "
+                         "see them); scored as 'stepped in'. Placed by --seed")
+    ap.add_argument("--puddle-at", action="append", default=[], metavar="X,Y,R[,FLOOR]",
+                    help="a puddle exactly here (floor 1 unless given); may repeat. "
+                         "Not checked for a way round: for the blocked-way cases")
+    ap.add_argument("--floor-guard", choices=["off", "sim"], default="off",
+                    help="sim: a simulated fast floor check (sensing/floor_guard.py) sees "
+                         "puddles in the camera's view; the dog goes round what it knows, "
+                         "and the pace is capped by the guard, not by VAMOS")
+    ap.add_argument("--fg-latency", type=float, default=fguard.LATENCY, metavar="S",
+                    help=f"floor guard: seconds from a frame to its answer ({fguard.LATENCY})")
+    ap.add_argument("--fg-see", type=float, default=fguard.SEE_D, metavar="M",
+                    help=f"floor guard: metres from the lens a puddle is seen ({fguard.SEE_D})")
+    ap.add_argument("--fg-miss", type=float, default=0.0, metavar="P",
+                    help="floor guard: chance a puddle in view is missed, per frame (0)")
     # The defaults are the PoC configuration, the one Gate D and the planner's
     # gate passed on (docs/dreaming_safety_kpis.md, 2026-10-14).
     ap.add_argument("--crowd", choices=["oblivious", "aware"], default="aware",
@@ -3859,7 +4006,9 @@ def main():
               vamos_samples=args.vamos_samples,
               handle=handle if args.handle else None,
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
-              robot=robot)
+              robot=robot, puddles=args.puddles, puddle_at=args.puddle_at,
+              floor_guard=args.floor_guard,
+              fg_latency=args.fg_latency, fg_see=args.fg_see, fg_miss=args.fg_miss)
     if robot is not None and hasattr(robot, "start"):
         robot.start()
 
@@ -3938,6 +4087,8 @@ def main():
         layer, why = ((halted.layer, str(halted)) if halted is not None
                       else run.gave_up or ("control", "leg ended without arriving"))
         print(f"{outcome} BY {layer}: {why}")
+    if run.fg is not None:
+        print(run.fg.summary(run.robot.CONTROL_DT))
     for floor, p in sorted(run.policies.items()):
         st = p.stats
         mean = st["safety_sum"] / st["chosen"] if st["chosen"] else 0.0

@@ -36,6 +36,7 @@
 #   VAMOS_MODE   route: shadow (default: VAMOS logged, the map drives, no VLM speed
 #                cap; its log copied to $OUT/shadow_log.jsonl) or steer (VAMOS steers,
 #                pace capped by its latency). See onboard.sh.
+#   BRAIN_ARGS   route: more run_building arguments, e.g. "--puddles 2 --floor-guard sim"
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
 #   POSE         route: where the board's pose comes from              (lio)
@@ -216,8 +217,8 @@ case "${1:-}" in
         on_board "POSE=$POSE $ONBOARD board" | tail -1
     fi
     start_gaps
-    on_board "VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
-    grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|help|planner|\[udp\]" \
+    on_board "BRAIN_ARGS='${BRAIN_ARGS:-}' VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
     # The board first (it prints the odometry's error and how it stopped on its

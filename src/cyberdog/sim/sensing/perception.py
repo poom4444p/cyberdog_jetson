@@ -86,6 +86,16 @@ PASS_ROOM = 0.45        # room a straight pass should keep before it is left
                         # m from the centreline; this is that and a margin.
 CENTRE_GAIN = 0.05      # ...and the extra room the middle must offer to be worth it
 SKIP = 0.30             # metres of the line ignored: where the dog already is
+SIDE_WALL = 0.35        # metres a sideways detour's line keeps from a wall
+                        # CORNER: on the way, no closer to a real wall face than
+                        # this, or than the dog is now or its aim will be (less
+                        # 0.05). So a detour that ends by a wall may run along
+                        # it, but not cut a corner on the way. Going round a
+                        # puddle in front of a side door, "roomiest" was the door
+                        # recess, and the line to it took the body into the
+                        # jamb, 0.28 m off the wall at 36 deg (twin, 11-16).
+                        # A flat 0.35 m from any wall instead changed the cartons
+                        # detour by room 201 (selftest's stress route).
 STATIC_MIN = 0.20       # ...and from the walls the map already knew about
 MAX_OFFSET = 1.6        # how far sideways the goal may be moved, metres.
                         # Tried at 2.2 -- the corridor's full width, so that a
@@ -129,6 +139,7 @@ class LiveClearance:
         self.still = None               # ...the same, minus anything walking
         self.points = np.empty((0, 2))  # the unexplained returns, for drawing
         self._scan = None               # this tick's returns, for `exclude`
+        self._flat = None               # this tick's flat things, [K, 2], see update
         # (col, row) world cell -> sim time last seen, as a grid: `seen[r, c]`
         # is cell (c + mc0, r + mr0), -inf never. A dict of cells was rebuilt
         # in Python every tick, and beside the trolley's dense returns that
@@ -147,27 +158,33 @@ class LiveClearance:
         out[ok] = self.dist[r[ok], c[ok]]
         return out
 
-    def update(self, points, floor_z, centre, origin=None):
+    def update(self, points, floor_z, centre, origin=None, flat=None):
         """Fold one scan in. `centre` is where the local window sits (the dog),
-        `origin` where the rays came from -- needed to know which way is behind."""
+        `origin` where the rays came from -- needed to know which way is behind.
+
+        `flat`, [K, 2] world points, is ground to keep off that was seen whole
+        (a puddle the floor guard knows of): occupied like a return, but with
+        no SHADOW behind it -- a camera sees the floor beyond a puddle, and a
+        shadowed puddle closed the way round it (twin, seed 1, 11-16). Not in
+        `points`, which the tracker and the drawing read."""
         self.local = self.still = None
         self.points = np.empty((0, 2))
         self._scan = None
-        if len(points) == 0:
+        self._flat = (np.asarray(flat, float).reshape(-1, 2)
+                      if flat is not None and len(flat) else None)
+        px = py = np.empty(0)
+        if len(points):
+            rel = points[:, 2] - floor_z
+            m = (rel > MIN_H) & (rel < MAX_H)
+            if m.any():
+                qx, qy = points[m, 0], points[m, 1]
+                # Anything standing where the map already says "not free" is a
+                # wall, a stairwell or the lift shaft -- known, and handled by
+                # the static field.
+                unknown = self._static(qx, qy) > EXPLAINED
+                px, py = qx[unknown], qy[unknown]
+        if len(px) == 0 and self._flat is None:
             return
-
-        rel = points[:, 2] - floor_z
-        m = (rel > MIN_H) & (rel < MAX_H)
-        if not m.any():
-            return
-        px, py = points[m, 0], points[m, 1]
-
-        # Anything standing where the map already says "not free" is a wall, a
-        # stairwell or the lift shaft -- known, and handled by the static field.
-        unknown = self._static(px, py) > EXPLAINED
-        if not unknown.any():
-            return
-        px, py = px[unknown], py[unknown]
         self.points = np.column_stack([px, py])
         self._scan = (px, py, centre, origin)
         self.local = self.still = self._field(px, py, centre, origin)
@@ -201,7 +218,7 @@ class LiveClearance:
             self.still = self.local
             return
         self.still = (self._field(px[keep], py[keep], centre, origin)
-                      if keep.any() else None)
+                      if keep.any() or self._flat is not None else None)
 
     def _shadowed(self, px, py, origin):
         """The returns plus SHADOW metres of ray behind each, as world points
@@ -227,6 +244,9 @@ class LiveClearance:
         # field, which costs 125 ms and would not survive a 20 Hz control loop.
         x0, y0 = centre[0] - WINDOW, centre[1] - WINDOW
         px, py = self._shadowed(px, py, origin)
+        if self._flat is not None:
+            px = np.concatenate([px, self._flat[:, 0]])
+            py = np.concatenate([py, self._flat[:, 1]])
         occ = np.zeros((self.n, self.n), dtype=bool)
         c = ((px - x0) / self.res).astype(int)
         r = ((py - y0) / self.res).astype(int)
@@ -607,6 +627,13 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         """Room for the person on the handle, too -- see PERSON_LINE."""
         return line_clear(xy, p, live.detected_at, PERSON_LINE)
 
+    # A sideways shift must not cut a wall's corner on the way: see SIDE_WALL.
+    here_wall = live.wall_at(*xy)
+
+    def off_walls(p):
+        need = min(SIDE_WALL, here_wall - 0.05, live.wall_at(*p) - 0.05)
+        return need <= 0.0 or line_clear(xy, p, live.wall_at, need)
+
     # Straight on is *allowed* at PERSON_LINE, but a pass that close is not
     # what to aim for when the gap has more: the dog drives a line, not the
     # middle of it, and arrives a little short of wherever it was sent. Floor-1
@@ -657,7 +684,8 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         while off <= max_offset + 1e-9:
             for sign in signs:
                 p = (pinch[0] + nx * off * sign, pinch[1] + ny * off * sign)
-                if not point_ok(p) or not through_no_wall(pinch, p, skip=0.0):
+                if (not point_ok(p) or not through_no_wall(pinch, p, skip=0.0)
+                        or not off_walls(p)):
                     continue
                 # Room against the real wall face, not the planner's inflated
                 # one: detected_at is a raw distance, and weighing it against
@@ -730,12 +758,12 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     s = 0.0
     while s <= run - 2 * SKIP:
         p = (pinch[0] + nx * want * side - ux * s, pinch[1] + ny * want * side - uy * s)
-        if reachable(p) and line_clear(xy, p, live.detected_at, keep):
+        if reachable(p) and off_walls(p) and line_clear(xy, p, live.detected_at, keep):
             return p, want * side
         s += 0.2
     for o in tries:
         p = (pinch[0] + nx * o * side, pinch[1] + ny * o * side)
-        if reachable(p):
+        if reachable(p) and off_walls(p):
             return p, o * side
 
     # Past the pinch, or nothing beside it can be reached from here: fall back
@@ -743,7 +771,7 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     # longer run-up.
     for o in tries:
         p = (goal[0] + nx * o * side, goal[1] + ny * o * side)
-        if reachable(p):
+        if reachable(p) and off_walls(p):
             return p, o * side
 
     # Nothing on that side fits yet but the destination itself is still reachable:
