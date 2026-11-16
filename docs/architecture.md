@@ -268,7 +268,12 @@ this. Stopping here." and stops (it used to stand there silent). Stopped, it
 may not turn on the spot towards a wall with its user (`UNPIN_DT`), and a
 detour line may not cut a wall corner (`perception.SIDE_WALL`: it once aimed
 into a side-door recess and hit the jamb). `--puddle-at X,Y,R[,F]` places one
-exactly, for the blocked-way cases. Simulated people (`--crowd aware`, the
+exactly, for the blocked-way cases. On the HIL rig, `PUDDLES="X,Y,R[,F] ..."` (map
+frame) gives the brain each as `--puddle-at` and go2_world each as
+`--puddle=` (shifted by `GO2_WORLD_ORIGIN`), which draws them in `RECORD=1`'s
+video only: HIL 15:05 (`PUDDLES="30.5,8.9,0.34 42.1,9.0,0.48"`,
+`BRAIN_ARGS="--floor-guard sim"`, 4 people) arrived in 84 s, both puddles known
+~2.1 m out and gone round, no collision, closest person 1.00 m. Simulated people (`--crowd aware`, the
 default) now stop for a dog right in front of them, as the oblivious ones did:
 before, a head-on walker with no room either side walked to 0.19 m of a dog
 standing still (`--pedestrians 3 --seed 2`); Gate D's aware numbers predate this.
