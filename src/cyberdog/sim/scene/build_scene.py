@@ -26,7 +26,7 @@ import yaml
 import numpy as np
 from PIL import Image
 
-from cyberdog.sim.scene import lift
+from cyberdog.sim.scene import furniture, lift
 from cyberdog.sim.scene import obstacles, pedestrians
 from cyberdog.sim.scene import stairs
 from cyberdog import paths
@@ -75,6 +75,17 @@ def wall_grid(floor):
             occ, np.ones((2 * cells + 1, 2 * cells + 1), dtype=bool),
             border_value=1)
     return occ, res, ox, oy
+
+
+def structure_grid(floor):
+    """wall_grid without the mapped furniture: what gets drawn as walls.
+
+    The furniture is in the grid for the planner and for clearance (a table
+    is something nobody may walk into), but drawn from here it would be a
+    full-height wall. furniture.geoms draws it at its real height instead.
+    """
+    occ, res, ox, oy = wall_grid(floor)
+    return furniture.clear_mapped(occ, res, ox, oy, floor), res, ox, oy
 
 
 def find_rects(occupied):
@@ -195,7 +206,9 @@ def slab_geoms(n, extent):
     z = floor_z(n)
     zb, rgba = z - SLAB_THICK, "0.42 0.43 0.46 1"
 
-    rects = [(X0, X1, Y0, Y1)]
+    # Only where there is building: the grid's bounding box of an L-shaped
+    # plan is mostly outside, and a slab there reads as a roof terrace.
+    rects = furniture.footprint() or [(X0, X1, Y0, Y1)]
     for gap in (stairs.hole(n), lift.hole(n)):
         rects = subtract(rects, gap)
     return [box(f"slab{n}_{i}", x0, x1, y0, y1, zb, z, rgba)
@@ -228,12 +241,13 @@ def camera_params():
 
 def build(floor=1):
     """Full scene XML for one floor: the Go2, the walls and the onboard camera."""
-    occ, res, ox, oy = wall_grid(floor)
+    occ, res, ox, oy = structure_grid(floor)
     rects = find_rects(occ)
     geoms = rects_to_geoms(rects, res, ox, oy, occ.shape[0])
     # Not from the grid -- see obstacles.py. This scene builds every storey at
     # z=0, so the boxes stand on the ground rather than on their own floor.
     geoms += obstacles.geoms(floor, z0=0.0)
+    geoms += furniture.geoms(floor, z0=0.0)
     # Parked underground until run_building puts them somewhere -- see
     # pedestrians.py. Emitted always: a mocap body cannot be added at runtime.
     geoms += pedestrians.bodies(floor)
@@ -291,7 +305,7 @@ def build_building(floors=(1, 2, 3)):
     extent = None
 
     for n in floors:
-        occ, res, ox, oy = wall_grid(n)
+        occ, res, ox, oy = structure_grid(n)
         H, W = occ.shape
         extent = (ox, ox + W * res, oy, oy + H * res)
         z = floor_z(n)
@@ -299,6 +313,7 @@ def build_building(floors=(1, 2, 3)):
         parts += slab_geoms(n, extent)
         parts += rects_to_geoms(find_rects(occ), res, ox, oy, H, z0=z, prefix=f"f{n}w")
         parts += obstacles.geoms(n)
+        parts += furniture.geoms(n)
         parts += pedestrians.bodies(n)
         if n != floors[-1]:
             parts += stair_geoms(n)

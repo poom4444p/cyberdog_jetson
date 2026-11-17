@@ -1964,7 +1964,7 @@ class Run:
             if (name == "ground" or name.startswith("slab") or name == "lift_plate"
                     or not m.geom_contype[g] and not m.geom_conaffinity[g]):
                 continue
-            scene[g] = (name.split("_", 1)[1] if name.startswith("obs")
+            scene[g] = (name.split("_", 1)[1] if name.startswith(("obs", "furn"))
                         else "stairs" if name.startswith("step")
                         else "lift" if name.startswith("lift")
                         else "wall")

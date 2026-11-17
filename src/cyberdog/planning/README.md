@@ -209,7 +209,8 @@ python scripts/mapping/generate_building.py
 # only needed if walls/room sizes changed:
 for n in 1 2 3; do
   python scripts/mapping/mesh_to_grid.py --mesh data/building/floor$n.obj \
-      --output data/building/maps/floor$n --up-axis z --points 4000000 --inflate 0.25
+      --output data/building/maps/floor$n --up-axis z --points 4000000 --inflate 0.25 \
+      --furniture data/building/furniture.json --floor $n
 done
 python tests/test_locations.py
 ```

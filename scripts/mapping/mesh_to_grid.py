@@ -4,11 +4,12 @@ import cv2
 import yaml
 import os
 import argparse
+import json
 
 AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
 def create_occupancy_grid(mesh_path, output_dir, resolution=0.05, num_points=1000000, up_axis="y",
-                          inflate_m=0.0):
+                          inflate_m=0.0, stamps=()):
     print(f"Loading 3D mesh from: {mesh_path}")
 
     up_idx = AXIS_INDEX[up_axis]
@@ -72,6 +73,19 @@ def create_occupancy_grid(mesh_path, output_dir, resolution=0.05, num_points=100
     # Draw obstacles (black = 0). We invert the second axis index to match image coordinates (top-left origin).
     grid_img[height - 1 - obs_b_idx, obs_a_idx] = 0
 
+    # Fixed furniture the height slice cannot see: a 0.75 m table sits
+    # entirely under the 0.8 - 1.3 m band, yet a building map has it in. Each
+    # stamp is a (x0, x1, y0, y1) footprint in the mesh's floor-plan axes,
+    # filled before inflation so it gets the same clearance as a wall.
+    for x0, x1, y0, y1 in stamps:
+        a0 = max(int((x0 - min_a) / resolution), 0)
+        a1 = min(int(np.ceil((x1 - min_a) / resolution)), width)
+        b0 = max(int((y0 - min_b) / resolution), 0)
+        b1 = min(int(np.ceil((y1 - min_b) / resolution)), height)
+        grid_img[height - b1:height - b0, a0:a1] = 0
+    if stamps:
+        print(f"Stamped {len(stamps)} furniture footprints")
+
     # Optional inflation. Surface sampling only hits the faces of a wall, so a
     # thick wall comes out as two thin dotted outlines with a hollow middle --
     # A* can slip through a 1-cell gap and walk *inside* the wall. Growing the
@@ -120,10 +134,23 @@ if __name__ == "__main__":
                         help='Grow obstacles by this many meters (default: 0 = off). Closes gaps in '
                              'sampled walls and keeps routes away from them; ~robot half-width.')
 
+    parser.add_argument('--furniture', type=str, default=None,
+                        help='furniture.json from generate_building.py; its "mapped" pieces for '
+                             '--floor are stamped into the grid as obstacles.')
+    parser.add_argument('--floor', type=int, default=None, help='Which floor of --furniture to stamp.')
+
     args = parser.parse_args()
+
+    stamps = []
+    if args.furniture:
+        if args.floor is None:
+            parser.error("--furniture needs --floor")
+        with open(args.furniture) as f:
+            pieces = json.load(f)["floors"].get(str(args.floor), [])
+        stamps = [(p["x0"], p["x1"], p["y0"], p["y1"]) for p in pieces if p["mapped"]]
 
     if not os.path.exists(args.output):
         os.makedirs(args.output)
 
     create_occupancy_grid(args.mesh, args.output, args.res, num_points=args.points,
-                          up_axis=args.up_axis, inflate_m=args.inflate)
+                          up_axis=args.up_axis, inflate_m=args.inflate, stamps=stamps)
