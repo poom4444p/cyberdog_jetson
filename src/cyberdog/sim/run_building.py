@@ -60,7 +60,7 @@ from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing import floor_guard as fguard
 from cyberdog.sim.sensing.dreaming import ROBOT_R
-from cyberdog.sim.sensing.lidar import EL_MAX, MOUNT_H, MOUNT_PITCH
+from cyberdog.sim.sensing.lidar import MOUNT_H
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
@@ -176,15 +176,23 @@ BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
 PROGRESS_M = 0.20         # m the dog must move in BLOCKED_S while going round something
 EXCUSE = "Excuse me, may we pass?"
 EXCUSE_S = 6.0            # s between asking a person in the way to let us by
-# ...and getting nowhere with a person in the way is not "I cannot get past
-# this": they can hear, and may move. Somebody stood still 0.75 m in front
-# of the dog, the dog said that, and the run ended there (--pedestrians 4
-# --seed 10 --puddles 2, 11-16); seed 3 the same with somebody at the door.
-# So past BLOCKED_S with a person-sized track within ASK_D ahead, the dog
-# stands still and asks, every EXCUSE_S, for up to ASK_S more; then stops.
-ASK_D = 1.5               # m ahead of the dog a track may be and be asked
-ASK_LAT = 0.8             # ...and m to either side of its line
-ASK_S = 30.0              # s of asking before it stops and says so
+# Blocked is blocked, whatever is there: a crate and somebody standing still
+# are both gone round. Only when there is no way round at all does the dog
+# stand and ask, every EXCUSE_S, for ASK_S -- whatever it is may be somebody
+# who can hear, and move. Still blocked after that, it is not somebody, or
+# not somebody who will move: the dog says so, the spot is closed on the
+# map (BLOCK_HALF, BLOCK_SPAN) and the rest of the trip is planned again
+# from where it stands -- another corridor, or the stairs if the person says
+# yes. Only with no other way at all does it stop. (Telling crates from
+# people by width and height, and waiting on people only, stood the dog in
+# front of anything person-sized asking it to move: HIL 11-17.)
+ASK_S = 20.0              # s of asking before finding another way
+BLOCK_AHEAD = 2.5         # m ahead of the dog the thing in the way is looked for
+BLOCK_HALF = 0.30         # m either side of it, along the way, closed on the map
+BLOCK_SPAN = 2.5          # m either side of the way, across it, closed with it
+MAX_REROUTES = 3          # other ways tried on one trip before stopping
+ASK_NEAR = 1.5            # m: no way round, and the thing in the way this near: stop and ask
+APPROACH_LAT = 0.9        # m either side of the dog's line that counts as in the way
 # Something inside the LiDAR's minimum range ahead. The rays start at the
 # dog's centre and MIN_R is 0.35 m (sensing/lidar.py, go2_world mid360), so
 # from 5 cm past its nose nothing is seen at all: somebody stood 0.38 m ahead
@@ -203,38 +211,10 @@ BLIND_MIN = 200           # returns in the scan before the share means anything
 # start, --pedestrians 4 --seed 11 --puddles 2, 11-16.
 BLIND_REAR_FRAC = 0.10
 BACK_CLEAR = 0.60         # m behind the dog that must hold no return at all to back off
-# A person's width, stood still. tracking.MAX_RADIUS (0.5) is what one cluster
-# can be at all; a track that walked past the floor-1 trolley and merged into
-# it reads 0.38-0.44, and was waited for and asked for 33 s with nobody there
-# (--pedestrians 4 --puddles 2, seeds 6 and 7, 11-16). People stood still
-# read 0.19-0.26 -- 0.32 half inside MIN_R at 0.2 m (seed 3).
-PERSON_R = 0.34
-# ...and a person's height. A carton of a person's width that never moves
-# (the floor-3 boxes, 0.7-0.95 m) was a person to KEEP_OFF and the asking,
-# and the biology and chemistry lab routes stopped in front of them saying
-# "Excuse me" (selftest, 11-16). People are 1.7 m. Ahead, the top of the
-# Mid-360's view is EL_MAX - MOUNT_PITCH (32 deg) above level from MOUNT_H,
-# and to the side and behind higher still, so that is the least it reaches:
-# 1.2 m only from ~1.1 m out. A track seen SHORT_N times from where that
-# reaches REACH_Z, and nothing of it ever above TALL_Z, is a short thing --
-# unless it has walked. Unknown height is a person: somebody stood 0.38 m
-# ahead at the start (seed 20) is never seen from far enough to be cleared.
-# A person under TALL_Z who stands still from first sight (a small child, or
-# somebody sitting) would read as a box: noted, not handled.
-TALL_Z = 1.05             # m above the floor: no crate reaches it
-REACH_Z = 1.20            # m the view must reach at the thing for its absence to count
-SEE_UP = math.tan(math.radians(EL_MAX - MOUNT_PITCH))
-SHORT_D = 4.0             # m: further out a cluster is too sparse to judge
-SHORT_N = 3               # ticks of being seen short before it counts
-HEIGHT_PAD = 0.10         # m past a track's radius its returns are looked for
-# The last word on the command, under the handle and the board: never towards
-# anything that may be a person (PERSON_R wide, or walking) nearer than
-# KEEP_OFF. Somebody who has not moved since the dog first saw them is a
-# crate to everything above -- the detours, the planner's people -- and the
-# dog walked past one at 0.46 m on a detour, and at 0.44 m on a plan
-# (--pedestrians 4 --seed 20 --puddles 2, 11-16). Only translation is cut:
-# turning on the spot does not close on anybody, and the waits and asking
-# above take it from there.
+# The last word on the command, under the handle and the board: never
+# towards somebody walking nearer than KEEP_OFF. Only translation is cut:
+# turning on the spot does not close on anybody. Things standing still are
+# gone round like any other (see ASK_S), at the detours' own margins.
 KEEP_OFF = 0.70
 # Run.respect_board: a robot with its own LiDAR guard (go2_board). Free
 # distance ahead, as the board measures it, under which pushing on is pointless
@@ -364,47 +344,13 @@ def blind_ahead(scan, pose, behind=False):
     return int((np.abs(az) < BLIND_AZ).sum()) < frac * share
 
 
-def may_be_person(t):
-    """A person's width (PERSON_R) -- or narrower still, if it has walked: a
-    person mostly inside MIN_R leaves a sliver, r 0.03, beside the dog
-    (--pedestrians 4 --seed 11, 11-16). Not wider: a walked track merged into
-    the trolley reads 0.4 (see PERSON_R). Not shorter: see TALL_Z."""
-    return t.r <= PERSON_R and (t.walked or (t.r >= MIN_RADIUS and not is_short(t)))
-
-
-def is_short(t):
-    """Seen often enough, close enough, to be sure nothing of it stands as
-    high as a person, and never walked. See TALL_Z."""
-    return not t.walked and not t.tall and t.low >= SHORT_N
-
-
-def judge_height(tracks, points, heights, origin):
-    """Mark each track seen this tick tall or short from the heights of its
-    returns. `origin` is the LiDAR's (x, y). See TALL_Z."""
-    if not len(points):
-        return
-    for t in tracks:
-        if t.missed or t.tall:
-            continue
-        mine = np.hypot(points[:, 0] - t.x, points[:, 1] - t.y) <= t.r + HEIGHT_PAD
-        if not mine.any():
-            continue
-        if (heights[mine] > TALL_Z).any():
-            t.tall = True
-            continue
-        d = float(np.hypot(points[mine, 0] - origin[0], points[mine, 1] - origin[1]).min())
-        if d <= SHORT_D and MOUNT_H + d * SEE_UP >= REACH_Z:
-            t.low += 1
-
-
 def closing_on(tracks, pose, cmd):
-    """Would body-frame `cmd` close on a track that may be a person, inside
-    KEEP_OFF? See there."""
+    """Would body-frame `cmd` close on somebody walking, inside KEEP_OFF?"""
     x, y, yaw = pose
     c, s = math.cos(yaw), math.sin(yaw)
     vx, vy = cmd[0] * c - cmd[1] * s, cmd[0] * s + cmd[1] * c
     for t in tracks:
-        if not (t.moving or may_be_person(t)):
+        if not t.moving:
             continue
         d = math.hypot(t.x - x, t.y - y)
         if 1e-6 < d < KEEP_OFF and (vx * (t.x - x) + vy * (t.y - y)) / d > 0.0:
@@ -425,23 +371,34 @@ def something_behind(points, pose):
     return bool((back & (np.hypot(dx, dy) < BACK_CLEAR)).any())
 
 
-def person_in_way(tracks, pose):
-    """The nearest track ahead that may be a person -- a person's width
-    (PERSON_R), walked or not -- within ASK_D along the dog's line and ASK_LAT
-    to either side, or None. See ASK_S. A crate of a person's width is asked
-    too: the LiDAR cannot tell them apart, and asking a crate costs nothing."""
+def nearest_ahead(points, pose):
+    """Metres along the dog's line to the nearest unexplained return in front
+    of it within APPROACH_LAT of that line; INF for none. See ASK_NEAR."""
+    if not len(points):
+        return INF
     x, y, yaw = pose
     c, s = math.cos(yaw), math.sin(yaw)
-    best, bd = None, INF
-    for t in tracks:
-        if not may_be_person(t):
-            continue
-        along = (t.x - x) * c + (t.y - y) * s
-        lat = -(t.x - x) * s + (t.y - y) * c
-        d = math.hypot(t.x - x, t.y - y)
-        if ((0.0 < along < ASK_D and abs(lat) < ASK_LAT) or d < KEEP_OFF) and d < bd:
-            best, bd = t, d          # ...or beside it, too close to move off (seed 11)
-    return best
+    dx, dy = points[:, 0] - x, points[:, 1] - y
+    along = dx * c + dy * s
+    m = (along > 0.0) & (np.abs(-dx * s + dy * c) < APPROACH_LAT)
+    return float(along[m].min()) if m.any() else INF
+
+
+def blocked_point(points, pose):
+    """Where the thing in the way is: the nearest unexplained return in front
+    of the dog within BLOCK_AHEAD, or, with none (inside the LiDAR's MIN_R:
+    see BLIND_FRAC), half a metre ahead of it. See ASK_S."""
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    if len(points):
+        dx, dy = points[:, 0] - x, points[:, 1] - y
+        along = dx * c + dy * s
+        d = np.hypot(dx, dy)
+        m = (along > 0.0) & (d < BLOCK_AHEAD)
+        if m.any():
+            i = np.flatnonzero(m)[np.argmin(d[m])]
+            return float(points[i, 0]), float(points[i, 1])
+    return x + 0.5 * c, y + 0.5 * s
 
 
 def overtaking(xy, yaw, t, speed=0.0):
@@ -1208,6 +1165,21 @@ class Leg(NamedTuple):
     transit: Transit = None     # choose_transit's answer, when `via` is set
 
 
+def close_spot(router, floor, xy, yaw):
+    """Close the way at `xy` on `floor`'s planning grid, for the rest of the
+    trip: a strip BLOCK_HALF either side of it along the dog's heading `yaw`
+    and BLOCK_SPAN either side across, wall to wall in any corridor, so the
+    next plan cannot squeeze back past it. See ASK_S."""
+    g = router.plan_grids[floor]
+    c, s = math.cos(yaw), math.sin(yaw)
+    res = g.resolution / 2.0
+    for a in np.arange(-BLOCK_HALF, BLOCK_HALF + 1e-9, res):
+        for b in np.arange(-BLOCK_SPAN, BLOCK_SPAN + 1e-9, res):
+            r, col = g.world_to_grid(xy[0] + a * c - b * s, xy[1] + a * s + b * c)
+            if 0 <= r < g.grid.shape[0] and 0 <= col < g.grid.shape[1]:
+                g.grid[r, col] = 100
+
+
 def plan_stops(router, stops, consent=None, start=None):
     """Stops -> [Leg], following the planner's own floor handoffs.
 
@@ -1445,7 +1417,7 @@ class Run:
                              "python -m cyberdog.sim.scene.build_scene --building")
         self.tracker = Tracker(self.robot.CONTROL_DT)
         self.waiting_for = None        # the track being yielded to, if any
-        self.person_stuck = False      # yield_to: a person in the way past ASK_S
+        self.reroute = None            # (floor, (x, y), yaw) of the spot to close: see ASK_S
         self.passing = None            # where the person being gone round stands
         self.passer_near = False       # someone passing in another lane within PASS_R
         self.overtakers_said = []      # tracks "Someone passing" has been said for
@@ -2576,27 +2548,13 @@ class Run:
         if held is not None:
             d = closest_approach(xy, vel, (held.x, held.y), (held.vx, held.vy))
             self.held_still = 0 if held.moving else self.held_still + 1
-            # A person's width still: a person stood in the way, not a crate.
-            # go_round has been looking for a way round them all along, with
-            # a person's margins, and found none -- so walking on now, round
-            # them as round furniture (DESTINATION_CLEAR), goes where the
-            # planner has just said it is not safe to: --seed 4, 0.53 m to
-            # 0.23 m as they stepped aside at the same moment, then lost
-            # inside the LiDAR's MIN_R, the dog turning its user onto the
-            # wall (--pedestrians 4 --puddles 2, 11-16). So they are asked,
-            # for ASK_S more, and then the dog stops and says why.
-            person_like = MIN_RADIUS <= held.r <= PERSON_R and not is_short(held)
-            patience = PATIENCE + (ASK_S if person_like else 0.0)
-            if d - min(held.r, 0.4) < CLEAR_R and self.held_still < patience * FPS:
+            # Somebody who stops in the way is in the way like anything else:
+            # PATIENCE for them to walk on, and then round them (ASK_S).
+            if d - min(held.r, 0.4) < CLEAR_R and self.held_still < PATIENCE * FPS:
                 self.waited += 1
                 self.ped["waited"] += 1
-                if self.waited % int(EXCUSE_S * FPS) == 0:
-                    self.say(EXCUSE)
                 return held
-            if self.held_still >= patience * FPS and person_like:
-                self.person_stuck = True                 # the caller stops: see follow
-                return held
-            if self.held_still >= patience * FPS:
+            if self.held_still >= PATIENCE * FPS:
                 # Not "they have stopped": the track can be a person who has
                 # walked on, merged into the crate beside them (room 101 seed
                 # 6, the trolley). Either way the way is not clearing.
@@ -2614,27 +2572,24 @@ class Run:
             return None
         return self.wait_for(person, xy, yaw)
 
-    def ask_in_way(self, tracks, pose, over, n):
-        """Past BLOCKED_S with nowhere to go (`over` ticks past it): is it a
-        person in the way, and ASK_S not up yet? Then True -- the caller
-        stands still -- and EXCUSE is said every EXCUSE_S. Else False, and the
-        caller stops; stop_line says what with."""
-        self.blocker = person_in_way(tracks, pose)
-        if self.blocker is None or over > ASK_S * FPS:
+    def ask_in_way(self, over, n):
+        """Past BLOCKED_S with no way round (`over` ticks past it): True while
+        ASK_S is not up -- the caller stands still -- with EXCUSE said every
+        EXCUSE_S, whatever is there. Then False: find_another_way."""
+        if over > ASK_S * FPS:
             return False
         if self.excused is None or n - self.excused >= EXCUSE_S * FPS:
             self.say(EXCUSE)
             self.excused = n
         return True
 
-    def stop_line(self, line, person=False):
-        """`line`, or the one for a person, if ask_in_way last found one."""
-        return ("Someone is in the way and I cannot get past. Stopping here."
-                if person or self.blocker is not None else line)
-
-    def asked_why(self):
-        return (f", then {ASK_S:.0f} s asking the person there"
-                if self.blocker is not None else "")
+    def find_another_way(self, floor, points, pose, why):
+        """Asked, and still blocked: say so, and end the leg for main to close
+        the spot on the map and plan the rest again (see ASK_S)."""
+        self.robot.set_velocity(0.0, 0.0, 0.0)
+        self.say("This way is blocked. Finding another way.")
+        self.reroute = (floor, blocked_point(points, pose), pose[2])
+        self.gave_up = ("blocked", why + f", then {ASK_S:.0f} s asking")
 
     def wait_for(self, person, xy, yaw):
         """Stand still for `person`, and hold on to them: see yield_to.
@@ -2660,9 +2615,8 @@ class Run:
             # and cannot see it.
             self.say(describe_person(xy, yaw, (person.x, person.y),
                                      (person.vx, person.vy)) + ". Waiting.")
-            # No way round them (the planner found none, or this is not the
-            # planner's case): stop, and ask -- the person in the way can hear.
-            self.say(EXCUSE)
+            # Not "Excuse me": they are walking, and will pass. That is for a
+            # way with no way round at all (ASK_S).
         self.waiting_for = person
         self.waited += 1
         self.ped["waited"] += 1
@@ -3135,8 +3089,8 @@ class Run:
         proposed, chosen, candidates, safety = None, None, [], 1.0
         hunting = halted = False
         stalled = no_goal = unseen = 0
-        self.excused = self.blocker = None   # see ask_in_way
-        self.person_stuck = False            # see yield_to
+        self.excused = None                  # see ask_in_way
+        self.reroute = None                  # see find_another_way
         blind_n = 0                          # ticks blind ahead: see BLIND_FRAC
         progress = None           # (x, y, tick) the last time the dog had moved PROGRESS_M
         lean = 0.0                # the side of a detour once it is committed
@@ -3171,6 +3125,8 @@ class Run:
             # on no map reacts because of this one call.
             self.step_crowd()
             live = self.clearance(floor)
+            if getattr(self.robot, "map_fix", None) is not None:
+                self.robot.map_fix.use(live)     # the board's pose onto this floor's map
             scan = self.robot.get_scan()
             scan_xyz = np.asarray(scan).reshape(-1, 3)
             blind = blind_ahead(scan_xyz, (x, y, yaw))
@@ -3198,7 +3154,6 @@ class Run:
             # Same returns, asked a different question: which of them moved
             # since last tick. A crate answers "none of me".
             tracks = self.tracker.update(live.points)
-            judge_height(tracks, live.points, live.heights, (x, y))
             walking = self.tracker.movers()
             # Somebody slower ahead in the lane: followed, or overtaken on the
             # left (see FOLLOW_GAP). Asked before anything plans round them:
@@ -3544,13 +3499,6 @@ class Run:
             else:
                 person = self.yield_to([t for t in tracks if t not in led],
                                        (x, y), yaw, speed)
-                if self.person_stuck:
-                    self.robot.set_velocity(0.0, 0.0, 0.0)
-                    self.say(self.stop_line("", person=True))
-                    self.gave_up = ("people", f"a person stood in the way at "
-                                    f"({person.x:.1f}, {person.y:.1f}), no safe way round "
-                                    f"them, and {PATIENCE + ASK_S:.0f} s of asking")
-                    return False, n
                 if person is None and self.passer_near:
                     speed = min(speed, PASS_V)           # walking past someone: see PASS_LAT
             if follow_cap is not None:
@@ -3586,14 +3534,12 @@ class Run:
                     or self.plan is not None or blind):
                 progress = (x, y, n)         # waiting for somebody is not getting nowhere
             elif n - progress[2] > BLOCKED_S * FPS:
-                if self.ask_in_way(tracks, (x, y, yaw), n - progress[2] - BLOCKED_S * FPS, n):
+                if self.ask_in_way(n - progress[2] - BLOCKED_S * FPS, n):
                     speed, err = 0.0, 0.0
                 else:
-                    self.robot.set_velocity(0.0, 0.0, 0.0)
-                    self.say(self.stop_line("I cannot get past this. Stopping here."))
-                    self.gave_up = ("perception", f"going round something at ({x:.1f}, {y:.1f}) "
-                                    f"and under {PROGRESS_M} m walked in {BLOCKED_S:.0f} s"
-                                    + self.asked_why())
+                    self.find_another_way(floor, live.points, (x, y, yaw),
+                                          f"going round something at ({x:.1f}, {y:.1f}) and "
+                                          f"under {PROGRESS_M} m walked in {BLOCKED_S:.0f} s")
                     return False, n
             if touching:
                 # Unconditional, and above everything else. This used to live
@@ -3625,14 +3571,13 @@ class Run:
                         and not something_behind(live.points, (x, y, yaw))):
                     speed, err = -BACK_V, 0.0
                 if stalled > BLOCKED_S * FPS and not blind:      # blind: see BLIND_FRAC
-                    if self.ask_in_way(tracks, (x, y, yaw), stalled - BLOCKED_S * FPS, n):
+                    if self.ask_in_way(stalled - BLOCKED_S * FPS, n):
                         speed, err = 0.0, 0.0        # not backing into the handle either
                     else:
-                        self.say(self.stop_line("I cannot find a way past this. Stopping here."))
-                        self.gave_up = ("perception", f"something within {ROBOT_R} m of the "
-                                        f"dog for {BLOCKED_S:.0f} s at ({x:.1f}, {y:.1f}), "
-                                        f"and nothing clear behind to back away into"
-                                        + self.asked_why())
+                        self.find_another_way(floor, live.points, (x, y, yaw),
+                                              f"something within {ROBOT_R} m of the dog for "
+                                              f"{BLOCKED_S:.0f} s at ({x:.1f}, {y:.1f}), and "
+                                              f"nothing clear behind to back away into")
                         return False, n
             elif on_vamos:
                 speed *= safety
@@ -3646,22 +3591,35 @@ class Run:
                 if not hunting:
                     hunting = True
                     self.say("Something ahead. Finding a way round.")
-                speed *= CRAWL
+                # No way round what it sees is not yet blocked while that is
+                # still far off: it walks on up to it at DETOUR pace, and only
+                # stops and asks inside ASK_NEAR. It stood asking a row of
+                # people 7.7 m away, a room short of them (HIL, --stand x3,
+                # 11-17). Not at CRAWL: 0.12 m/s is under what the gait steps
+                # at, and it stood 80 s 2 m short while the board, asked to go
+                # and going nowhere, sidestepped 38 times.
+                # A puddle the floor guard holds is in the way too, though not
+                # in `points`: walking on up to "nothing seen" would be into it.
+                seen = (live.points if live._flat is None
+                        else np.vstack([live.points.reshape(-1, 2), live._flat]))
+                near = nearest_ahead(seen, (x, y, yaw))
+                speed *= DETOUR
                 self.obs["crawl"] += 1
-                if blocked or touching:
+                # Nothing ahead at all and still no way: whatever it is, it
+                # is not something to walk up to. Stop here, as before.
+                if touching or (blocked and (near < ASK_NEAR or near == INF)):
                     speed, stalled = 0.0, stalled + 1
                     self.obs["stopped"] += 1
                     if not halted:
                         halted = True
                         self.say("Stopping. I have no clear way past.")
                     if (stalled > BLOCKED_S * FPS and not blind and not
-                            self.ask_in_way(tracks, (x, y, yaw), stalled - BLOCKED_S * FPS, n)):
-                        self.say(self.stop_line("I cannot find a way past this. Stopping here."))
-                        self.gave_up = ("perception", f"free_destination found no gap "
-                                        f"round what the LiDAR saw for {BLOCKED_S:.0f} s at "
-                                        f"({x:.1f}, {y:.1f})"
-                                        + (", and no VAMOS path passed" if self.vamos else "")
-                                        + self.asked_why())
+                            self.ask_in_way(stalled - BLOCKED_S * FPS, n)):
+                        self.find_another_way(floor, live.points, (x, y, yaw),
+                                              f"free_destination found no gap round what the "
+                                              f"LiDAR saw for {BLOCKED_S:.0f} s at "
+                                              f"({x:.1f}, {y:.1f})"
+                                              + (", and no VAMOS path passed" if self.vamos else ""))
                         return False, n
                 else:
                     stalled, halted = 0, False
@@ -3739,12 +3697,10 @@ class Run:
                 if (blind_n - 1) % int(EXCUSE_S * FPS) == 0:
                     self.say(EXCUSE)
                 if blind_n > (BLOCKED_S + ASK_S) * FPS:
-                    self.robot.set_velocity(0.0, 0.0, 0.0)
-                    self.say("Something is right in front of me and I cannot get past. "
-                             "Stopping here.")
-                    self.gave_up = ("perception", f"no returns ahead -- something inside "
-                                    f"the LiDAR's minimum range -- for "
-                                    f"{BLOCKED_S + ASK_S:.0f} s at ({x:.1f}, {y:.1f})")
+                    self.find_another_way(floor, live.points, (x, y, yaw),
+                                          f"no returns ahead -- something inside the "
+                                          f"LiDAR's minimum range -- for {BLOCKED_S:.0f} s "
+                                          f"at ({x:.1f}, {y:.1f})")
                     return False, n
             else:
                 blind_n = 0
@@ -4226,6 +4182,9 @@ def main():
     ap.add_argument("--twin-lidar", action="store_true",
                     help="with --robot go2_board: perceive with the twin's raycast, not the "
                          "board's Mid-360 cloud (sees no real person; for comparison only)")
+    ap.add_argument("--no-map-fix", action="store_true",
+                    help="with --robot go2_board: use the board's pose as it is, without "
+                         "aligning the scans' walls to the map (sensing/map_fix.py)")
     ap.add_argument("--lift-host", default="127.0.0.1", metavar="IP",
                     help="with --robot go2_board: where go2_world's lift takes calls (udp 9880)")
     ap.add_argument("--brain-listen", default=None, metavar="IP",
@@ -4252,7 +4211,9 @@ def main():
     if not os.path.exists(scene):
         raise SystemExit("no building scene yet -- run: python -m cyberdog.sim.scene.build_scene --building")
 
-    router = BuildingRouter(allow_stairs=not args.no_stairs,
+    # The board cannot climb (BoardTwinRobot.place refuses a scripted climb):
+    # a way found round a blocked corridor (ASK_S) must not be the stairs.
+    router = BuildingRouter(allow_stairs=not args.no_stairs and args.robot != "go2_board",
                             lift_in_service=not args.lift_out_of_service)
     # A refusal -- stairs as a destination, or a floor the lift misses -- is an
     # answer, not a crash. It is the sentence the user would hear.
@@ -4271,6 +4232,9 @@ def main():
             robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN,
                                    board_host=args.board_host, listen=args.brain_listen,
                                    lift=LiftLink(args.lift_host), clouds=not args.twin_lidar)
+            if not args.no_map_fix and not args.twin_lidar:
+                from cyberdog.sim.sensing.map_fix import MapFix
+                robot.map_fix = MapFix()                # see sensing/map_fix.py
             start_xy, legs, faces = plan_stops(router, stops,
                                                start=(START_FLOOR, robot.get_pose()[:2]))
         else:
@@ -4321,7 +4285,7 @@ def main():
                            f"to go there.", what="destination"):
                 raise HandleStop(f'"{heard}" was not confirmed as {place}',
                                  layer="language")
-        k = 0
+        k = reroutes = 0
         while k < len(legs):
             floor, name, waypoints, announcements, via, stop, transit = legs[k]
             # Ask #1, as the dog is about to set off for the stairs -- not at
@@ -4345,7 +4309,29 @@ def main():
             ok, ticks = run.follow(waypoints, floor, announcements,
                                    goal_r=LIFT_GOAL_R if via == "lift" else GOAL_R,
                                    to_lift=via == "lift")
+            if not ok and run.reroute is not None and reroutes < MAX_REROUTES:
+                # Blocked, asked, still blocked: that way is closed for this
+                # trip, and the rest is planned again from here (see ASK_S).
+                rfloor, spot, ryaw = run.reroute
+                close_spot(router, rfloor, spot, ryaw)
+                reroutes += 1
+                here = run.robot.get_pose()[:2]
+                try:
+                    _, rest, rest_faces = plan_stops(router, stops[stop:], start=(floor, here))
+                except NoAccessibleRoute as refusal:
+                    run.say("I cannot find another way. Stopping here.")
+                    print(f"  leg {k + 1}: blocked at ({spot[0]:.1f}, {spot[1]:.1f}) and no "
+                          f"other way: {refusal}")
+                    break
+                print(f"  leg {k + 1}: blocked at ({spot[0]:.1f}, {spot[1]:.1f}); planned "
+                      f"again from ({here[0]:.1f}, {here[1]:.1f}): {len(rest)} leg(s)")
+                legs = legs[:k] + [leg._replace(stop=leg.stop + stop) for leg in rest]
+                faces = {i: p for i, p in faces.items() if i < k}
+                faces.update({k + i: p for i, p in rest_faces.items()})
+                continue
             if not ok:
+                if run.reroute is not None:
+                    run.say("I cannot find another way. Stopping here.")
                 print(f"  leg {k + 1} timed out after {ticks} ticks")
                 break
             if k in faces:
@@ -4370,6 +4356,8 @@ def main():
     if args.robot == "go2_board":
         run.robot.board.lie()
         run.robot.close()
+        if run.robot.map_fix is not None:
+            print(run.robot.map_fix.report())
 
     x, y, _ = run.robot.get_pose()
     if isinstance(halted, HandleStop):
