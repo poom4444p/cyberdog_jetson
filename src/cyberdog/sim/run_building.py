@@ -60,7 +60,7 @@ from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing import floor_guard as fguard
 from cyberdog.sim.sensing.dreaming import ROBOT_R
-from cyberdog.sim.sensing.lidar import MOUNT_H
+from cyberdog.sim.sensing.lidar import EL_MAX, MOUNT_H, MOUNT_PITCH
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
@@ -176,6 +176,66 @@ BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
 PROGRESS_M = 0.20         # m the dog must move in BLOCKED_S while going round something
 EXCUSE = "Excuse me, may we pass?"
 EXCUSE_S = 6.0            # s between asking a person in the way to let us by
+# ...and getting nowhere with a person in the way is not "I cannot get past
+# this": they can hear, and may move. Somebody stood still 0.75 m in front
+# of the dog, the dog said that, and the run ended there (--pedestrians 4
+# --seed 10 --puddles 2, 11-16); seed 3 the same with somebody at the door.
+# So past BLOCKED_S with a person-sized track within ASK_D ahead, the dog
+# stands still and asks, every EXCUSE_S, for up to ASK_S more; then stops.
+ASK_D = 1.5               # m ahead of the dog a track may be and be asked
+ASK_LAT = 0.8             # ...and m to either side of its line
+ASK_S = 30.0              # s of asking before it stops and says so
+# Something inside the LiDAR's minimum range ahead. The rays start at the
+# dog's centre and MIN_R is 0.35 m (sensing/lidar.py, go2_world mid360), so
+# from 5 cm past its nose nothing is seen at all: somebody stood 0.38 m ahead
+# at the start was not one return, and the dog walked 0.17 m into them at
+# 0.75 m/s (--pedestrians 4 --seed 3 --puddles 2, 11-16). What does show is
+# the hole: a forward sector that should have its share of the returns (the
+# floor, the ceiling, the walls: 0.96-1.12 of it, every tick, lift included,
+# 0 and 4 people) and has none. Under BLIND_FRAC of that share, nothing moves.
+BLIND_AZ = math.radians(25)   # half-width of the forward sector
+BLIND_FRAC = 0.30         # of its share of the scan, below which it is blind
+BLIND_MIN = 200           # returns in the scan before the share means anything
+# Behind, the rays point up (MOUNT_PITCH) and under a high ceiling find
+# nothing: 0.79 of the share in the corridors, down to 0.20 on floor 3. So
+# only below this is it something there -- and it only ever stops the dog
+# backing away (BACK_V), into somebody it cannot see: 0.32 m behind it at the
+# start, --pedestrians 4 --seed 11 --puddles 2, 11-16.
+BLIND_REAR_FRAC = 0.10
+BACK_CLEAR = 0.60         # m behind the dog that must hold no return at all to back off
+# A person's width, stood still. tracking.MAX_RADIUS (0.5) is what one cluster
+# can be at all; a track that walked past the floor-1 trolley and merged into
+# it reads 0.38-0.44, and was waited for and asked for 33 s with nobody there
+# (--pedestrians 4 --puddles 2, seeds 6 and 7, 11-16). People stood still
+# read 0.19-0.26 -- 0.32 half inside MIN_R at 0.2 m (seed 3).
+PERSON_R = 0.34
+# ...and a person's height. A carton of a person's width that never moves
+# (the floor-3 boxes, 0.7-0.95 m) was a person to KEEP_OFF and the asking,
+# and the biology and chemistry lab routes stopped in front of them saying
+# "Excuse me" (selftest, 11-16). People are 1.7 m. Ahead, the top of the
+# Mid-360's view is EL_MAX - MOUNT_PITCH (32 deg) above level from MOUNT_H,
+# and to the side and behind higher still, so that is the least it reaches:
+# 1.2 m only from ~1.1 m out. A track seen SHORT_N times from where that
+# reaches REACH_Z, and nothing of it ever above TALL_Z, is a short thing --
+# unless it has walked. Unknown height is a person: somebody stood 0.38 m
+# ahead at the start (seed 20) is never seen from far enough to be cleared.
+# A person under TALL_Z who stands still from first sight (a small child, or
+# somebody sitting) would read as a box: noted, not handled.
+TALL_Z = 1.05             # m above the floor: no crate reaches it
+REACH_Z = 1.20            # m the view must reach at the thing for its absence to count
+SEE_UP = math.tan(math.radians(EL_MAX - MOUNT_PITCH))
+SHORT_D = 4.0             # m: further out a cluster is too sparse to judge
+SHORT_N = 3               # ticks of being seen short before it counts
+HEIGHT_PAD = 0.10         # m past a track's radius its returns are looked for
+# The last word on the command, under the handle and the board: never towards
+# anything that may be a person (PERSON_R wide, or walking) nearer than
+# KEEP_OFF. Somebody who has not moved since the dog first saw them is a
+# crate to everything above -- the detours, the planner's people -- and the
+# dog walked past one at 0.46 m on a detour, and at 0.44 m on a plan
+# (--pedestrians 4 --seed 20 --puddles 2, 11-16). Only translation is cut:
+# turning on the spot does not close on anybody, and the waits and asking
+# above take it from there.
+KEEP_OFF = 0.70
 # Run.respect_board: a robot with its own LiDAR guard (go2_board). Free
 # distance ahead, as the board measures it, under which pushing on is pointless
 # (the guard stops at 0.30 m and crawls below 1 m), the free distance that ends
@@ -288,6 +348,100 @@ def passes_by(xy, yaw, t, horizon=None):
         return False
     end = lat + lat_v * (PASS_HORIZON if horizon is None else horizon)
     return lat * end > 0 and min(abs(lat), abs(end)) >= PASS_LAT
+
+
+def blind_ahead(scan, pose, behind=False):
+    """Is the forward sector missing its returns -- something inside MIN_R?
+    See BLIND_FRAC. Only from the points, so the board's cloud works too.
+    `behind`: the sector behind instead, against BLIND_REAR_FRAC."""
+    if len(scan) < BLIND_MIN:
+        return False
+    x, y, yaw = pose
+    frac = BLIND_REAR_FRAC if behind else BLIND_FRAC
+    az = np.arctan2(scan[:, 1] - y, scan[:, 0] - x) - yaw - (np.pi if behind else 0.0)
+    az = (az + np.pi) % (2 * np.pi) - np.pi
+    share = len(scan) * BLIND_AZ / np.pi
+    return int((np.abs(az) < BLIND_AZ).sum()) < frac * share
+
+
+def may_be_person(t):
+    """A person's width (PERSON_R) -- or narrower still, if it has walked: a
+    person mostly inside MIN_R leaves a sliver, r 0.03, beside the dog
+    (--pedestrians 4 --seed 11, 11-16). Not wider: a walked track merged into
+    the trolley reads 0.4 (see PERSON_R). Not shorter: see TALL_Z."""
+    return t.r <= PERSON_R and (t.walked or (t.r >= MIN_RADIUS and not is_short(t)))
+
+
+def is_short(t):
+    """Seen often enough, close enough, to be sure nothing of it stands as
+    high as a person, and never walked. See TALL_Z."""
+    return not t.walked and not t.tall and t.low >= SHORT_N
+
+
+def judge_height(tracks, points, heights, origin):
+    """Mark each track seen this tick tall or short from the heights of its
+    returns. `origin` is the LiDAR's (x, y). See TALL_Z."""
+    if not len(points):
+        return
+    for t in tracks:
+        if t.missed or t.tall:
+            continue
+        mine = np.hypot(points[:, 0] - t.x, points[:, 1] - t.y) <= t.r + HEIGHT_PAD
+        if not mine.any():
+            continue
+        if (heights[mine] > TALL_Z).any():
+            t.tall = True
+            continue
+        d = float(np.hypot(points[mine, 0] - origin[0], points[mine, 1] - origin[1]).min())
+        if d <= SHORT_D and MOUNT_H + d * SEE_UP >= REACH_Z:
+            t.low += 1
+
+
+def closing_on(tracks, pose, cmd):
+    """Would body-frame `cmd` close on a track that may be a person, inside
+    KEEP_OFF? See there."""
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    vx, vy = cmd[0] * c - cmd[1] * s, cmd[0] * s + cmd[1] * c
+    for t in tracks:
+        if not (t.moving or may_be_person(t)):
+            continue
+        d = math.hypot(t.x - x, t.y - y)
+        if 1e-6 < d < KEEP_OFF and (vx * (t.x - x) + vy * (t.y - y)) / d > 0.0:
+            return True
+    return False
+
+
+def something_behind(points, pose):
+    """Any unexplained return in the half behind the dog within BACK_CLEAR?
+    Backing off (BACK_V) only into nothing at all: somebody stood 0.32 m off
+    its back quarter, mostly inside MIN_R, showed only as a few returns past
+    it, and the dog backed into them (--pedestrians 4 --seed 11, 11-16)."""
+    if not len(points):
+        return False
+    x, y, yaw = pose
+    dx, dy = points[:, 0] - x, points[:, 1] - y
+    back = dx * math.cos(yaw) + dy * math.sin(yaw) < 0.0
+    return bool((back & (np.hypot(dx, dy) < BACK_CLEAR)).any())
+
+
+def person_in_way(tracks, pose):
+    """The nearest track ahead that may be a person -- a person's width
+    (PERSON_R), walked or not -- within ASK_D along the dog's line and ASK_LAT
+    to either side, or None. See ASK_S. A crate of a person's width is asked
+    too: the LiDAR cannot tell them apart, and asking a crate costs nothing."""
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    best, bd = None, INF
+    for t in tracks:
+        if not may_be_person(t):
+            continue
+        along = (t.x - x) * c + (t.y - y) * s
+        lat = -(t.x - x) * s + (t.y - y) * c
+        d = math.hypot(t.x - x, t.y - y)
+        if ((0.0 < along < ASK_D and abs(lat) < ASK_LAT) or d < KEEP_OFF) and d < bd:
+            best, bd = t, d          # ...or beside it, too close to move off (seed 11)
+    return best
 
 
 def overtaking(xy, yaw, t, speed=0.0):
@@ -721,6 +875,9 @@ EVADE_R = 0.80            # metres: predicted closer than this (PED_NEAR + 0.25)
 EVADE_T = 1.5             # ...within this many seconds starts a step aside
 EVADE_STEP_T = 0.5        # seconds of SIDE_V each step is judged over
 EVADE_GAIN = 0.05         # metres a step must win over standing still
+EVADE_KEEP = EVADE_R      # metres: no step takes the dog nearer than this to
+                          # anybody standing, unless it is already nearer and
+                          # the step does not close it further
 EVADE_V = 0.30            # m/s: slower tracks are not about to arrive anywhere
                           # that is not walking: ROBOT_R and a hand's width
 CROSS_V = 0.3             # m/s: slower than this, across or along, is not a
@@ -730,6 +887,9 @@ AFF_EVERY = 5             # ticks between affordance checks in --affordance-shad
 AFF_HALF_W = 0.3          # metres either side of the judged walk that ground truth looks at
 PED_NEAR = 0.55           # ground truth: nearer than this to a person counts
                           # as a contact. Scoring only, never shown the robot.
+DOG_CLOSING = 0.05        # ground truth: m/s the dog itself closes on a person,
+                          # inside PED_NEAR, before that tick is the dog's doing
+                          # and not theirs. Scoring only, as PED_NEAR.
 
 # The person being guided. They walk behind the dog holding a rigid handle
 # (RDog's), so they are always straight behind it along its heading: the
@@ -1285,6 +1445,7 @@ class Run:
                              "python -m cyberdog.sim.scene.build_scene --building")
         self.tracker = Tracker(self.robot.CONTROL_DT)
         self.waiting_for = None        # the track being yielded to, if any
+        self.person_stuck = False      # yield_to: a person in the way past ASK_S
         self.passing = None            # where the person being gone round stands
         self.passer_near = False       # someone passing in another lane within PASS_R
         self.overtakers_said = []      # tracks "Someone passing" has been said for
@@ -2180,7 +2341,14 @@ class Run:
                 if best is None or rank(room, aw) > best[0]:
                     best = (rank(room, aw), alt)
         touch = min(HANDLER_R, wall_now)
-        pinned = w != 0.0 and walls < touch and (best is None or best[0][0] < touch)
+        # Into anything, not only a wall: rank() puts walls first, so a pivot
+        # that swung its user onto the floor-1 trolley, 0.00 m of room left
+        # and 0.40 m off the walls, went through untouched (--pedestrians 4
+        # --seed 4 --puddles 2, 11-16, 2.97 rad/s on the spot).
+        touch_any = min(HANDLER_R, now)
+        into_thing = worst < touch_any and (best is None or best[0][1] < touch_any)
+        pinned = w != 0.0 and ((walls < touch and (best is None or best[0][0] < touch))
+                               or into_thing)
         if pinned and self.turn_held < HOLD_TURN_S / self.robot.CONTROL_DT:
             # Every way of making this turn puts them into a wall: hold it.
             # Standing still keeps them where they are; the turn is asked for
@@ -2327,14 +2495,33 @@ class Run:
 
         Same rule as score_collision -- never fed back into the robot. The
         dog stops for people because it tracked them, or it does not stop.
+
+        And who closed the gap. A person walking into a dog that is standing
+        still is a contact, and is reported as one, but it is not the dog
+        walking at them: each tick inside PED_NEAR the closing speed is split
+        into the dog's part (its own motion along the line to them) and
+        theirs. Over DOG_CLOSING of the dog's own is the dog's doing.
         """
+        now = self.robot.now()
+        prev = self.ped.get("prev")
+        dt = now - prev[0] if prev is not None and prev[3] == floor else 0.0
+        seen = {}
         near = []
         for w in self.crowds[floor].walkers:
             d = math.hypot(w.x - x, w.y - y)
+            seen[id(w)] = (w.x, w.y)
             self.ped["min_d"] = min(self.ped["min_d"], d)
             if d < PED_NEAR:
                 self.ped["near"] += 1
                 near.append((d, w))
+                if dt > 0.0 and d > 1e-6:
+                    ux, uy = (w.x - x) / d, (w.y - y) / d
+                    v = ((x - prev[1]) * ux + (y - prev[2]) * uy) / dt
+                    if v > DOG_CLOSING:
+                        self.ped["dog_in"] = self.ped.get("dog_in", 0) + 1
+                        self.ped["dog_v"] = max(self.ped.get("dog_v", 0.0), v)
+                        self.ped["dog_in_now"] = self.ped.get("dog_in_now", 0) + 1
+        self.ped["prev"] = (now, x, y, floor, seen)
         # When and where, as for the handle: a total alone cannot be traced
         # back to the moment it happened.
         yaw = self.robot.get_pose()[2]
@@ -2346,9 +2533,12 @@ class Run:
                   f"heading {math.degrees(yaw):.0f} deg, {w.kind} walker ({w.x:.2f}, {w.y:.2f}) "
                   f"heading {math.degrees(math.atan2(hy, hx)):.0f} deg, {d:.2f} m")
         elif not near and self.ped["since"] is not None:
+            k = self.ped.pop("dog_in_now", 0)
             print(f"    t={self.robot.now():6.1f}s  CONTACT ends after "
                   f"{self.robot.now() - self.ped['since']:.1f}s: dog ({x:.2f}, {y:.2f}) "
-                  f"heading {math.degrees(yaw):.0f} deg")
+                  f"heading {math.degrees(yaw):.0f} deg; "
+                  + (f"the dog closing in for {k / FPS:.1f}s of it" if k
+                     else "the dog never closing in"))
             self.ped["since"] = None
 
     def yield_to(self, tracks, xy, yaw, speed):
@@ -2386,13 +2576,27 @@ class Run:
         if held is not None:
             d = closest_approach(xy, vel, (held.x, held.y), (held.vx, held.vy))
             self.held_still = 0 if held.moving else self.held_still + 1
-            if d - min(held.r, 0.4) < CLEAR_R and self.held_still < PATIENCE * FPS:
+            # A person's width still: a person stood in the way, not a crate.
+            # go_round has been looking for a way round them all along, with
+            # a person's margins, and found none -- so walking on now, round
+            # them as round furniture (DESTINATION_CLEAR), goes where the
+            # planner has just said it is not safe to: --seed 4, 0.53 m to
+            # 0.23 m as they stepped aside at the same moment, then lost
+            # inside the LiDAR's MIN_R, the dog turning its user onto the
+            # wall (--pedestrians 4 --puddles 2, 11-16). So they are asked,
+            # for ASK_S more, and then the dog stops and says why.
+            person_like = MIN_RADIUS <= held.r <= PERSON_R and not is_short(held)
+            patience = PATIENCE + (ASK_S if person_like else 0.0)
+            if d - min(held.r, 0.4) < CLEAR_R and self.held_still < patience * FPS:
                 self.waited += 1
                 self.ped["waited"] += 1
                 if self.waited % int(EXCUSE_S * FPS) == 0:
                     self.say(EXCUSE)
                 return held
-            if self.held_still >= PATIENCE * FPS:
+            if self.held_still >= patience * FPS and person_like:
+                self.person_stuck = True                 # the caller stops: see follow
+                return held
+            if self.held_still >= patience * FPS:
                 # Not "they have stopped": the track can be a person who has
                 # walked on, merged into the crate beside them (room 101 seed
                 # 6, the trolley). Either way the way is not clearing.
@@ -2408,7 +2612,40 @@ class Run:
                 self.say("Thank you. Carrying on.")
             self.waiting_for, self.waited, self.held_still = None, 0, 0
             return None
+        return self.wait_for(person, xy, yaw)
 
+    def ask_in_way(self, tracks, pose, over, n):
+        """Past BLOCKED_S with nowhere to go (`over` ticks past it): is it a
+        person in the way, and ASK_S not up yet? Then True -- the caller
+        stands still -- and EXCUSE is said every EXCUSE_S. Else False, and the
+        caller stops; stop_line says what with."""
+        self.blocker = person_in_way(tracks, pose)
+        if self.blocker is None or over > ASK_S * FPS:
+            return False
+        if self.excused is None or n - self.excused >= EXCUSE_S * FPS:
+            self.say(EXCUSE)
+            self.excused = n
+        return True
+
+    def stop_line(self, line, person=False):
+        """`line`, or the one for a person, if ask_in_way last found one."""
+        return ("Someone is in the way and I cannot get past. Stopping here."
+                if person or self.blocker is not None else line)
+
+    def asked_why(self):
+        return (f", then {ASK_S:.0f} s asking the person there"
+                if self.blocker is not None else "")
+
+    def wait_for(self, person, xy, yaw):
+        """Stand still for `person`, and hold on to them: see yield_to.
+
+        Every wait goes through here, so every one is latched and said. The
+        one go_round hands back (somebody inside NEAR_R, no way round) used
+        to stand still for a tick without either: no "Excuse me", and no
+        latch, so when the person paused -- because the dog was in front of
+        them -- their track fell under MOVING_V, nothing asked about them any
+        more, and the dog walked on at them while they stood there: 0.46 m,
+        turning towards them (--pedestrians 4 --seed 6 --puddles 2, 11-16)."""
         if self.waiting_for is None:
             self.ped["yields"] += 1
             if self.planner == "cerrt":
@@ -2774,6 +3011,13 @@ class Run:
                 return 0.0
         lx, ly = -math.sin(yaw), math.cos(yaw)          # the dog's left
         bx, by = -HANDLER_BEHIND * math.cos(yaw), -HANDLER_BEHIND * math.sin(yaw)
+        # Everybody else who may be a person: stood still, or not yet seen to
+        # walk. `people` above is only who is walking, and a step away from
+        # them only had to keep ROBOT_R off anything else -- the dog stepped
+        # left, from somebody walking up on its right towards somebody stood
+        # 0.7 m off on its left (--pedestrians 4 --seed 1 --puddles 2, 11-16).
+        standing = [t for t in tracks if t not in people
+                    and (t.walked or MIN_RADIUS <= t.r <= MAX_RADIUS)]
 
         def least(v):
             dog = handle = INF
@@ -2809,6 +3053,9 @@ class Run:
                     or nose(ex, ey) < floors[2]
                     or self.handler_room(live, ex, ey, yaw) < floors[3]):
                 continue
+            if any(math.hypot(ex - s.x, ey - s.y) < min(EVADE_KEEP, math.hypot(x - s.x, y - s.y))
+                   for s in standing):
+                continue                                 # away from one, into another
             d, h = least(v)
             if h < min(ce_rrt.HANDLER_SEP, stay_h):
                 continue
@@ -2888,6 +3135,9 @@ class Run:
         proposed, chosen, candidates, safety = None, None, [], 1.0
         hunting = halted = False
         stalled = no_goal = unseen = 0
+        self.excused = self.blocker = None   # see ask_in_way
+        self.person_stuck = False            # see yield_to
+        blind_n = 0                          # ticks blind ahead: see BLIND_FRAC
         progress = None           # (x, y, tick) the last time the dog had moved PROGRESS_M
         lean = 0.0                # the side of a detour once it is committed
         held, against = None, 0   # its last aim, and ticks the other side was offered
@@ -2922,6 +3172,8 @@ class Run:
             self.step_crowd()
             live = self.clearance(floor)
             scan = self.robot.get_scan()
+            scan_xyz = np.asarray(scan).reshape(-1, 3)
+            blind = blind_ahead(scan_xyz, (x, y, yaw))
             fresh = False             # the floor guard found a new puddle this tick
             if self.fg_on:
                 # The floor guard's answers, kept off as flat ground: see
@@ -2946,6 +3198,7 @@ class Run:
             # Same returns, asked a different question: which of them moved
             # since last tick. A crate answers "none of me".
             tracks = self.tracker.update(live.points)
+            judge_height(tracks, live.points, live.heights, (x, y))
             walking = self.tracker.movers()
             # Somebody slower ahead in the lane: followed, or overtaken on the
             # left (see FOLLOW_GAP). Asked before anything plans round them:
@@ -3278,10 +3531,9 @@ class Run:
                                if self.planner == "cerrt" else (None, None))
             if round_to is None and close is not None:
                 # Somebody within NEAR_R walking into the dog's way, and no
-                # way round them: stand still, as for any other wait.
-                person = close
-                self.waited += 1
-                self.ped["waited"] += 1
+                # way round them: stand still, as for any other wait -- and
+                # the same wait, latched and asked for (wait_for).
+                person = self.wait_for(close, (x, y), yaw)
             elif round_to is not None:
                 # Going round them: not waiting, and at the pace the plan
                 # was timed at, since where it passes them depends on when.
@@ -3292,6 +3544,13 @@ class Run:
             else:
                 person = self.yield_to([t for t in tracks if t not in led],
                                        (x, y), yaw, speed)
+                if self.person_stuck:
+                    self.robot.set_velocity(0.0, 0.0, 0.0)
+                    self.say(self.stop_line("", person=True))
+                    self.gave_up = ("people", f"a person stood in the way at "
+                                    f"({person.x:.1f}, {person.y:.1f}), no safe way round "
+                                    f"them, and {PATIENCE + ASK_S:.0f} s of asking")
+                    return False, n
                 if person is None and self.passer_near:
                     speed = min(speed, PASS_V)           # walking past someone: see PASS_LAT
             if follow_cap is not None:
@@ -3324,14 +3583,18 @@ class Run:
                 self.say("Something ahead. Stepping around it to your "
                          f"{'left' if offset > 0 else 'right'}.")
             if (self.waiting_for is not None or self.narrow_waited > 0 or not hunting
-                    or self.plan is not None):
+                    or self.plan is not None or blind):
                 progress = (x, y, n)         # waiting for somebody is not getting nowhere
             elif n - progress[2] > BLOCKED_S * FPS:
-                self.robot.set_velocity(0.0, 0.0, 0.0)
-                self.say("I cannot get past this. Stopping here.")
-                self.gave_up = ("perception", f"going round something at ({x:.1f}, {y:.1f}) "
-                                f"and under {PROGRESS_M} m walked in {BLOCKED_S:.0f} s")
-                return False, n
+                if self.ask_in_way(tracks, (x, y, yaw), n - progress[2] - BLOCKED_S * FPS, n):
+                    speed, err = 0.0, 0.0
+                else:
+                    self.robot.set_velocity(0.0, 0.0, 0.0)
+                    self.say(self.stop_line("I cannot get past this. Stopping here."))
+                    self.gave_up = ("perception", f"going round something at ({x:.1f}, {y:.1f}) "
+                                    f"and under {PROGRESS_M} m walked in {BLOCKED_S:.0f} s"
+                                    + self.asked_why())
+                    return False, n
             if touching:
                 # Unconditional, and above everything else. This used to live
                 # only in the branch below, so a dog on a detour had no
@@ -3357,14 +3620,20 @@ class Run:
                 behind = (x - BACK_STEP * math.cos(yaw),
                           y - BACK_STEP * math.sin(yaw))
                 if (live.detected_at(*behind) > ROBOT_R
-                        and live.static_at(*behind) > perception.STATIC_MIN):
+                        and live.static_at(*behind) > perception.STATIC_MIN
+                        and not blind_ahead(scan_xyz, (x, y, yaw), behind=True)
+                        and not something_behind(live.points, (x, y, yaw))):
                     speed, err = -BACK_V, 0.0
-                if stalled > BLOCKED_S * FPS:
-                    self.say("I cannot find a way past this. Stopping here.")
-                    self.gave_up = ("perception", f"something within {ROBOT_R} m of the "
-                                    f"dog for {BLOCKED_S:.0f} s at ({x:.1f}, {y:.1f}), "
-                                    f"and nothing clear behind to back away into")
-                    return False, n
+                if stalled > BLOCKED_S * FPS and not blind:      # blind: see BLIND_FRAC
+                    if self.ask_in_way(tracks, (x, y, yaw), stalled - BLOCKED_S * FPS, n):
+                        speed, err = 0.0, 0.0        # not backing into the handle either
+                    else:
+                        self.say(self.stop_line("I cannot find a way past this. Stopping here."))
+                        self.gave_up = ("perception", f"something within {ROBOT_R} m of the "
+                                        f"dog for {BLOCKED_S:.0f} s at ({x:.1f}, {y:.1f}), "
+                                        f"and nothing clear behind to back away into"
+                                        + self.asked_why())
+                        return False, n
             elif on_vamos:
                 speed *= safety
             elif offset:
@@ -3385,12 +3654,14 @@ class Run:
                     if not halted:
                         halted = True
                         self.say("Stopping. I have no clear way past.")
-                    if stalled > BLOCKED_S * FPS:
-                        self.say("I cannot find a way past this. Stopping here.")
+                    if (stalled > BLOCKED_S * FPS and not blind and not
+                            self.ask_in_way(tracks, (x, y, yaw), stalled - BLOCKED_S * FPS, n)):
+                        self.say(self.stop_line("I cannot find a way past this. Stopping here."))
                         self.gave_up = ("perception", f"free_destination found no gap "
                                         f"round what the LiDAR saw for {BLOCKED_S:.0f} s at "
                                         f"({x:.1f}, {y:.1f})"
-                                        + (", and no VAMOS path passed" if self.vamos else ""))
+                                        + (", and no VAMOS path passed" if self.vamos else "")
+                                        + self.asked_why())
                         return False, n
                 else:
                     stalled, halted = 0, False
@@ -3410,7 +3681,11 @@ class Run:
                 # Stopped, and not turning either: swinging round to track
                 # somebody walking past is what a dog does and is not what a
                 # handle attached to a person's arm should do.
-                if self.waited < YIELD_MAX * FPS:
+                # Creeping is for a queue of people walking past one after
+                # another, never at somebody stood still: that is the dog
+                # walking at them (see yield_to, ASK_S).
+                if (self.waited < YIELD_MAX * FPS or self.waiting_for is None
+                        or not self.waiting_for.moving):
                     speed, err = 0.0, self.unpin(live, (x, y, yaw)) / K_W
                 else:
                     # They are not going anywhere. Neither can the dog stand
@@ -3453,6 +3728,29 @@ class Run:
                     cmd = (0.0, side, 0.0)
             elif self.evading:
                 self.evading = 0.0
+            # Something inside the minimum range ahead: stand still, and ask --
+            # it may well be somebody (see BLIND_FRAC). Above everything but
+            # the board and the handle, which only ever stop it.
+            if blind:
+                cmd = (0.0, 0.0, 0.0)
+                blind_n += 1
+                if blind_n == 1:
+                    self.say("Stopping. Something is right in front of me.")
+                if (blind_n - 1) % int(EXCUSE_S * FPS) == 0:
+                    self.say(EXCUSE)
+                if blind_n > (BLOCKED_S + ASK_S) * FPS:
+                    self.robot.set_velocity(0.0, 0.0, 0.0)
+                    self.say("Something is right in front of me and I cannot get past. "
+                             "Stopping here.")
+                    self.gave_up = ("perception", f"no returns ahead -- something inside "
+                                    f"the LiDAR's minimum range -- for "
+                                    f"{BLOCKED_S + ASK_S:.0f} s at ({x:.1f}, {y:.1f})")
+                    return False, n
+            else:
+                blind_n = 0
+            if (cmd[0] or cmd[1]) and closing_on(tracks, (x, y, yaw), cmd):
+                cmd = (0.0, 0.0, cmd[2])          # see KEEP_OFF
+                self.ped["kept_off"] = self.ped.get("kept_off", 0) + 1
             # The board's guard is the real sensor's word: what the plan wants
             # it cannot overrule, so it works with it instead (a robot with a
             # guard: go2_board, or the twin modelling it; the plain twin has
@@ -4172,7 +4470,8 @@ def main():
     if args.pedestrians or run.ped["yields"]:
         pd = run.ped
         print(f"people: {pd['yields']} times it stopped to let someone past, "
-              f"{pd['waited'] / FPS:.1f}s waiting in total")
+              f"{pd['waited'] / FPS:.1f}s waiting in total; held off moving "
+              f"towards somebody within {KEEP_OFF} m for {pd.get('kept_off', 0) / FPS:.1f}s")
         if run.planner == "cerrt":
             pl = run.plans
             tried = pl["made"] + pl["none"]
@@ -4188,8 +4487,12 @@ def main():
                 print("planner: waited instead because -- " + ", ".join(
                     f"{why} {k}" for why, k in run.why_wait.most_common()))
         if pd["near"]:
+            k = pd.get("dog_in", 0)
             print(f"CONTACT: {pd['near'] / FPS:.1f}s within {PED_NEAR} m of a person "
-                  f"(closest {pd['min_d']:.2f} m)")
+                  f"(closest {pd['min_d']:.2f} m); "
+                  + (f"DOG CLOSING IN for {k / FPS:.1f}s of it "
+                     f"(up to {pd['dog_v']:.2f} m/s)" if k
+                     else f"the dog never closing in faster than {DOG_CLOSING} m/s"))
         elif not args.pedestrians:
             # Nobody in this run's own crowd to be near: on the board the people
             # walk in go2_world, which scores them (run_hil.sh's "world truth").

@@ -54,6 +54,26 @@ from scipy import ndimage
 from cyberdog.sim.clearance import clearance_field, wall_face_field
 
 EXPLAINED = 0.35        # static clearance above this: the map calls it open floor
+# ...except beside a wall, where a return is the wall only within FACE_EXPLAINED
+# of its real face. The static field is measured from walls already inflated
+# by grid_inflation (0.25 m), so EXPLAINED alone wrote off everything within
+# 0.60 m of a wall: a person walking the keep-right lane, 0.27 m off it, had
+# no return left and was not there at all -- gone from the tracker for 0.7 s
+# while overtaking, then back 0.9 m off the dog's flank, which had stepped
+# towards them round a puddle (--pedestrians 4 --seed 4 --puddles 2, 11-16).
+# On the board's own pose (lio, xy off by up to 0.21 m, yaw 9.5 deg) the
+# walls land 0.15-0.3 m off their faces: 2830 wall returns a scan left
+# unexplained (HIL PEOPLE=6, 11-17, CLOUD_LOG replay), and the dog waits
+# more than it needs to. 0.30 cut that to 175 but hid people by the wall
+# again: twin seed 2, the handler on the wall 2.9 s and the dog closing on
+# somebody to 0.17 m. The pose is what needs fixing, not this.
+FACE_EXPLAINED = 0.15   # metres from a real wall face that is still the wall
+# Only where the wall is all the static field has there: static reading about
+# face - grid_inflation. Clearly less, and something else on the map is nearer
+# -- a zone, something the faces do not have -- and EXPLAINED decides as
+# before (11 returns off one at x 2.2 on floor 2, selftest "no false positives").
+GRID_INFLATION = 0.25   # map_config grid_inflation (build_scene.INFLATION)
+WALL_ONLY_TOL = 0.05    # m of grid rounding between the two fields
 MIN_H, MAX_H = 0.08, 1.8  # ankle height to head height, above the floor
 WINDOW = 8.0            # half-width of the local costmap, metres
 SHADOW = 1.0            # how far behind a return to treat as unknown, metres
@@ -138,6 +158,7 @@ class LiveClearance:
         self.local = None               # (edt, x0, y0) while something is seen
         self.still = None               # ...the same, minus anything walking
         self.points = np.empty((0, 2))  # the unexplained returns, for drawing
+        self.heights = np.empty(0)      # ...and each one's height above the floor
         self._scan = None               # this tick's returns, for `exclude`
         self._flat = None               # this tick's flat things, [K, 2], see update
         # (col, row) world cell -> sim time last seen, as a grid: `seen[r, c]`
@@ -158,6 +179,15 @@ class LiveClearance:
         out[ok] = self.dist[r[ok], c[ok]]
         return out
 
+    def _face(self, x, y):
+        """Vectorised wall_at. Outside the map reads as zero (a wall)."""
+        c = ((x - self.ox) / self.res).astype(int)
+        r = (self.H - 1 - (y - self.oy) / self.res).astype(int)
+        ok = (r >= 0) & (r < self.H) & (c >= 0) & (c < self.W)
+        out = np.zeros(len(x))
+        out[ok] = self.faces[r[ok], c[ok]]
+        return out
+
     def update(self, points, floor_z, centre, origin=None, flat=None):
         """Fold one scan in. `centre` is where the local window sits (the dog),
         `origin` where the rays came from -- needed to know which way is behind.
@@ -169,10 +199,11 @@ class LiveClearance:
         `points`, which the tracker and the drawing read."""
         self.local = self.still = None
         self.points = np.empty((0, 2))
+        self.heights = np.empty(0)
         self._scan = None
         self._flat = (np.asarray(flat, float).reshape(-1, 2)
                       if flat is not None and len(flat) else None)
-        px = py = np.empty(0)
+        px = py = pz = np.empty(0)
         if len(points):
             rel = points[:, 2] - floor_z
             m = (rel > MIN_H) & (rel < MAX_H)
@@ -181,11 +212,17 @@ class LiveClearance:
                 # Anything standing where the map already says "not free" is a
                 # wall, a stairwell or the lift shaft -- known, and handled by
                 # the static field.
-                unknown = self._static(qx, qy) > EXPLAINED
-                px, py = qx[unknown], qy[unknown]
+                # Near a wall that is decided by the real face, not the
+                # inflated one: see FACE_EXPLAINED. Elsewhere (zones, the
+                # parts of the map the faces do not have) as before.
+                face, static = self._face(qx, qy), self._static(qx, qy)
+                wall_only = static >= face - GRID_INFLATION - WALL_ONLY_TOL
+                known = np.where(wall_only, face < FACE_EXPLAINED, static <= EXPLAINED)
+                px, py, pz = qx[~known], qy[~known], rel[m][~known]
         if len(px) == 0 and self._flat is None:
             return
         self.points = np.column_stack([px, py])
+        self.heights = pz
         self._scan = (px, py, centre, origin)
         self.local = self.still = self._field(px, py, centre, origin)
 
