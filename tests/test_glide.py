@@ -51,8 +51,26 @@ def test_the_twin_takes_no_extra_ticks():
     assert robot.calls == line
 
 
-def test_a_board_that_cannot_get_there_gives_up_after_glide_settle_s():
+def test_a_board_that_cannot_get_there_gives_up_once_it_stops_getting_nearer():
     robot = Robot((46.5, 9.5, 0.43), gain=0.0)                      # never moves
     run_with(robot).glide((45.0, 9.5), math.pi, 4.4)
     line = max(int(1.5 / (rb.STEP_V * DT)), 1)
-    assert robot.calls == line + int(rb.GLIDE_SETTLE_S / DT)
+    assert robot.calls == line + round(rb.GLIDE_STUCK_S / DT)
+
+
+class Strafeless(Robot):
+    """Walks forward and turns, never sideways: the board, out of the floor-3
+    car, 0.27 m short of a spot to its side (HIL 11-17)."""
+
+    def place(self, xy, yaw, z=None):
+        x, y, th = self.pose
+        super().place(xy, yaw, z)
+        if abs(self.pose[0] - x) < 0.02:
+            self.pose[1] = y                         # the sideways part is not taken
+
+
+def test_a_board_that_will_not_step_sideways_is_not_held_in_the_door():
+    robot = Strafeless((45.0, 9.3, math.pi), gain=0.10)
+    run_with(robot).glide((45.0, 9.05), math.pi, 4.4)
+    line = max(int(0.25 / (rb.STEP_V * DT)), 1)
+    assert robot.calls <= line + round((rb.GLIDE_STUCK_S + 0.5) / DT)   # not GLIDE_SETTLE_S
