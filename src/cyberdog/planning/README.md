@@ -139,6 +139,8 @@ on the route* instead of the final goal.
    - Behind the camera or outside the margin → `ALIGN` with `turn: left/right`
 3. **`project_route`** — both steps; `ARRIVED` when no waypoints remain.
 4. **`vamos_prompt`** — `"Navigate to x=<locXXXX>, y=<locYYYY>."`
+   With a preference (`run_building --vamos-steer TEXT`, spec L4 s3) it follows the goal:
+   `"Navigate to x=<locXXXX>, y=<locYYYY>. Keep to the left wall."`
 
 ### Camera config
 

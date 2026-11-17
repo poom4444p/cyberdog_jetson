@@ -35,6 +35,8 @@
 #   TRACE=1                         brain prints its commands, ~5 lines/s
 #   BRAIN_ARGS                      more run_building arguments, e.g.
 #                                   "--puddles 2 --floor-guard sim"
+#   VAMOS_STEER                     a preference added after the goal in every VAMOS
+#                                   prompt (--vamos-steer), passed as one argument
 #   TRACK_LOG=1                     brain writes every track, every tick, to
 #                                   $CYBERDOG/output/tracks.jsonl (--track-log)
 #   CLOUD_LOG=1                     brain saves its scans to
@@ -119,7 +121,9 @@ case "${1:-}" in
         steer)  mode=(--vamos) ;;
         *)      echo "VAMOS_MODE: shadow or steer, not '$VAMOS_MODE'"; exit 1 ;;
     esac
-    echo "VAMOS_MODE=$VAMOS_MODE"
+    echo "VAMOS_MODE=$VAMOS_MODE${VAMOS_STEER:+ VAMOS_STEER=$VAMOS_STEER}"
+    steer=()
+    [ -n "${VAMOS_STEER:-}" ] && steer=(--vamos-steer "$VAMOS_STEER")
     tracklog=()
     if [ "${TRACK_LOG:-0}" = 1 ]; then
         mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/tracks.jsonl"
@@ -133,7 +137,7 @@ case "${1:-}" in
     # (23 ms a frame); on the dog it comes from a USB camera.
     MUJOCO_GL=egl exec taskset -c "$BRAIN_CORES" python -u "${run[@]}" "$dest" --robot go2_board \
         --lift-host "$LIFT_HOST" "${mode[@]}" --vamos-samples "$samples" --auto-confirm --no-video "${tracklog[@]}" \
-        ${BRAIN_ARGS:-} ;;
+        "${steer[@]}" ${BRAIN_ARGS:-} ;;
 
   stop)
     # [x]yz: matches the process, not a shell whose command line holds the pattern

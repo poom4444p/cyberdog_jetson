@@ -47,7 +47,7 @@ def stub():
                                 pending=None, vlm_latency=None, policy=lambda floor: vamos,
                                 vlm={"asked": 0, "answers": 0, "dropped": 0, "age": 0.0,
                                      "moved": 0.0, "cap_min": None},
-                                vlm_asked_t=None, vlm_lat=[])
+                                vamos_steer=None, vlm_asked_t=None, vlm_lat=[])
     for name in ("ask_vamos", "take_answer", "vlm_busy", "vlm_speed_cap"):
         setattr(run, name, getattr(rb.Run, name).__get__(run))
     return run, vamos

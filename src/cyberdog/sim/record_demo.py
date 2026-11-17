@@ -41,7 +41,11 @@ def main():
     ap.add_argument("--out", default=str(paths.SCENE_CACHE / "demo.mp4"))
     ap.add_argument("--vamos", action="store_true",
                     help="steer with the VLM instead of straight at the checkpoint")
+    ap.add_argument("--vamos-steer", default=None, metavar="TEXT",
+                    help="with --vamos: a preference added after the goal in the prompt")
     args = ap.parse_args()
+    if args.vamos_steer is not None and not args.vamos:
+        ap.error("--vamos-steer goes into the VAMOS prompt; it needs --vamos")
     paths.ensure_output()
 
     waypoints = plan_route(args.destination)
@@ -85,7 +89,7 @@ def main():
         # Ask the VLM on a slow clock; a call costs seconds, control runs at 20 Hz.
         if policy is not None and state["state"] == "TRACK" and n % REPLAN_EVERY == 0:
             chosen, candidates, safety = policy.plan(
-                dog, vamos_prompt(state), robot.camera_pose(), state["destination"],
+                dog, vamos_prompt(state, args.vamos_steer), robot.camera_pose(), state["destination"],
                 pose=(x, y, yaw))
 
         cpose = robot.camera_pose()
