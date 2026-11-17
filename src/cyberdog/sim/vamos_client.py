@@ -9,9 +9,14 @@ deterministic scorer picks one. On the real system that scorer is the
 affordance MLP; here it is the ground-truth map, which is honest for a PoC
 and gives the MLP something to be measured against.
 
-Two stages to the disposing. First a cheap geometric test throws out anything
-whose drawn line leaves free space -- no point imagining a path that is
-already through a wall. What survives is handed to dreaming.py, which rolls
+Up to three stages to the disposing. First a cheap geometric test throws out
+anything whose drawn line leaves free space -- no point imagining a path that
+is already through a wall. Then, if one is given, the affordance network
+(spec L5, cyberdog.affordance) judges the ground each path walks onto from
+the LiDAR's elevation patch, and refuses what it calls not walkable: the
+map's clearance knows walls, not a step or a kerb the map never had. This
+is the paper's affordance re-ranking, as a filter in front of the dream
+rather than in place of it. What survives is handed to dreaming.py, which rolls
 the dog's own controller forward along it with noise and comes back with a
 safety factor: the probability of getting down it without hitting anything,
 weighted by how much room it left. That factor gates (below GATE, rejected),
@@ -71,10 +76,14 @@ class VamosPolicy:
     """Asks the VLM for paths, scores them, returns the winner in map frame."""
 
     def __init__(self, cam, is_free, dream=None, url=DEFAULT_URL, num_samples=5,
-                 timeout=120, sample=False):
+                 timeout=120, sample=False, affordance=None):
         self.cam = cam
         self.is_free = is_free          # (x, y) -> bool, stands in for the affordance MLP
         self.dream = dream              # dreaming.Dream, or None for geometry only
+        # (paths, pose) -> one class name per path ("walkable", "caution",
+        # "not walkable") or None where it cannot say; None is no affordance
+        # stage. A callable, so this module stays free of torch.
+        self.affordance = affordance
         self.url = url
         self.num_samples = num_samples
         self.timeout = timeout
@@ -91,11 +100,13 @@ class VamosPolicy:
         self.last = None
         self.safety = 1.0               # factor of the path currently being followed
         # Last call's candidates, each with what became of it: (path, factor,
-        # verdict), verdict "off-map", "gate" or "pass". Factor is None where
+        # verdict), verdict "behind", "off-map", "affordance", "gate" or
+        # "pass". Factor is None where
         # the dream never ran. Shadow mode logs this; nothing steers by it.
         self.verdicts = []
         self.stats = {"calls": 0, "failures": 0, "rejected": 0,
                       "rejected_by_gate": 0, "rejected_behind": 0,
+                      "rejected_by_affordance": 0, "affordance_unjudged": 0,
                       "safety_sum": 0.0, "chosen": 0}
         self.last_error = None     # why the latest failed call failed, for the log
 
@@ -209,6 +220,22 @@ class VamosPolicy:
         walkable = [p for p in paths if self.traversable(p)]
         self.stats["rejected"] += len(paths) - len(walkable)
         self.verdicts += [(p, None, "off-map") for p in paths if p not in walkable]
+
+        # The ground itself: what the map cannot know is there. A path the
+        # network cannot judge (too little seen, or turning) goes on to the
+        # dream unjudged -- no judgement is not a refusal.
+        if self.affordance is not None and walkable:
+            classes = self.affordance(walkable, pose)
+            kept = []
+            for p, c in zip(walkable, classes):
+                if c == "not walkable":
+                    self.stats["rejected_by_affordance"] += 1
+                    self.stats["rejected"] += 1
+                    self.verdicts.append((p, None, "affordance"))
+                else:
+                    self.stats["affordance_unjudged"] += c is None
+                    kept.append(p)
+            walkable = kept
 
         scored = []
         for p in walkable:

@@ -1344,7 +1344,7 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
-                 vamos_samples=5,
+                 vamos_samples=5, vamos_affordance=False,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
                  track_log=None, robot=None, cloud_log=None, puddles=0, puddle_at=(),
                  floor_guard=None, fg_latency=fguard.LATENCY, fg_see=fguard.SEE_D,
@@ -1439,6 +1439,14 @@ class Run:
             self.aff, self.elev = Affordance(), ElevationMemory()
             os.makedirs(os.path.dirname(os.path.abspath(affordance_shadow)), exist_ok=True)
             self.aff_log = open(affordance_shadow, "w")
+        # The same network judging VAMOS's candidates (--vamos-affordance):
+        # one that calls the ground a path walks onto not walkable rejects it
+        # before the dream (vamos_client.deliver). Shares the network and the
+        # elevation memory with the shadow when both are on.
+        self.vamos_affordance = vamos_affordance
+        if vamos_affordance and self.aff is None:
+            from cyberdog.affordance.runtime import Affordance, ElevationMemory
+            self.aff, self.elev = Affordance(), ElevationMemory()
         # Training pairs for the VAMOS LoRA (--autolabel): the frame, and the
         # path the dog went on to walk from it. Map-only runs only.
         self.autolabel = None
@@ -1722,13 +1730,23 @@ class Run:
                             dream=Dream(live, self.robot.MAX_V,
                                         person=lambda x, y, yaw: self.handler_room(
                                             live, x, y, yaw)), url=url,
-                            sample=self.vamos_sample, num_samples=self.vamos_samples)
+                            sample=self.vamos_sample, num_samples=self.vamos_samples,
+                            affordance=(lambda ps, pose: self.judge_candidates(live, ps, pose))
+                            if self.vamos_affordance else None)
             if not p.available():
                 raise SystemExit(f"FAILED BY vamos: server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first, "
                                  "or pass --no-vamos to drive the map route alone")
             self.policies[floor] = p
         return self.policies[floor]
+
+    def judge_candidates(self, live, paths, pose):
+        """The affordance network on VAMOS's candidates (--vamos-affordance):
+        one class name per path, None where it cannot say. One elevation
+        patch at the dog's pose now, the map's walls made floor (the network
+        judges ground; walls are the clearance field's)."""
+        from cyberdog.affordance.runtime import judge_paths
+        return judge_paths(self.aff, self.elev.patch(pose, live.wall_at), pose, paths)
 
     def log_shadow(self, floor, n, pose, target, proposed, safety):
         """One shadow-mode call: what VAMOS offered, what the dream made of
@@ -3488,7 +3506,7 @@ class Run:
                                                 off_route=route_offset((x, y), waypoints, i) > FUNNEL_OFF)
             if asked and self.shadow:
                 self.log_shadow(floor, n, (x, y, yaw), (tx, ty), proposed, safety)
-            if self.aff is not None and n % AFF_EVERY == 0:
+            if self.aff_log is not None and n % AFF_EVERY == 0:
                 self.shadow_affordance(floor, (x, y, yaw), (tx, ty), live)
 
             # Reported, not acted on: free_destination already decided whether
@@ -4251,6 +4269,10 @@ def main():
                     const=str(paths.OUTPUT_DIR / "affordance_shadow.jsonl"),
                     help="run the affordance network watching, not steering: log what it "
                          "would say about the walk ahead, against what was really there")
+    ap.add_argument("--vamos-affordance", action="store_true",
+                    help="with --vamos or --shadow: the affordance network judges each "
+                         "VAMOS candidate from the LiDAR elevation patch and rejects what "
+                         "it calls not walkable, before the safety gate (spec L5 s4)")
     ap.add_argument("--autolabel", default=None, metavar="DIR",
                     help="keep onboard frames labelled with the path the dog then walked, "
                          "for the VAMOS LoRA (sim/autolabel.py); map-only, not with --vamos")
@@ -4296,6 +4318,8 @@ def main():
     # --autolabel records the map-only walk.
     if args.vamos is None:
         args.vamos = not (args.shadow or args.autolabel)
+    if args.vamos_affordance and not (args.vamos or args.shadow):
+        ap.error("--vamos-affordance judges VAMOS's candidates; it needs --vamos or --shadow")
     try:
         handle = HandleScript(args.handle)
     except ValueError as bad:
@@ -4359,7 +4383,7 @@ def main():
               planner=args.planner, track_log=args.track_log, cloud_log=args.cloud_log,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
-              vamos_samples=args.vamos_samples,
+              vamos_samples=args.vamos_samples, vamos_affordance=args.vamos_affordance,
               handle=handle if args.handle else None,
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
               robot=robot, puddles=args.puddles, puddle_at=args.puddle_at,
@@ -4472,10 +4496,14 @@ def main():
     for floor, p in sorted(run.policies.items()):
         st = p.stats
         mean = st["safety_sum"] / st["chosen"] if st["chosen"] else 0.0
-        off_map = st["rejected"] - st["rejected_by_gate"] - st["rejected_behind"]
+        off_map = (st["rejected"] - st["rejected_by_gate"] - st["rejected_behind"]
+                   - st["rejected_by_affordance"])
+        aff = (f"{st['rejected_by_affordance']} by the affordance network "
+               f"({st['affordance_unjudged']} more it could not judge), "
+               if p.affordance is not None else "")
         print(f"VAMOS floor {floor}: {st['calls']} calls, {st['failures']} failed, "
               f"{st['rejected']} candidates rejected "
-              f"({st['rejected_by_gate']} of them by the safety gate, {off_map} by "
+              f"({st['rejected_by_gate']} of them by the safety gate, {aff}{off_map} by "
               f"traversable() through a wall or obstacle, {st['rejected_behind']} "
               f"already behind the dog), "
               f"mean safety of the paths it followed {mean:.2f}")

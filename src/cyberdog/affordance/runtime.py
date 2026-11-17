@@ -13,7 +13,9 @@ never sees, otherwise wins every cell -- highest-wins -- and turns a corridor
 into a field of 2 m walls.
 
 Affordance asks the network about walking from the dog to a point ahead,
-with the 0.2 refusal rule (model.REFUSE_P). It knows nothing of the map; it
+with the 0.2 refusal rule (infer.REFUSE_P). It runs in numpy (infer.py), so
+the brain needs no torch: the weights are models/affordance/mlp.npz, made
+from mlp.pt by `python -m cyberdog.affordance.model export`. It knows nothing of the map; it
 judges ground. Pose comes from the twin; on the robot it would be odometry,
 and the memory is only as good as that is over 3 m.
 """
@@ -21,7 +23,7 @@ import math
 
 import numpy as np
 
-from cyberdog.affordance import data, model as M
+from cyberdog.affordance import data, infer
 
 KEEP_M = 3.0            # metres of walking whose scans are remembered
 MAX_H = 1.0             # metres above the floor: higher is not ground (ceiling, lamps)
@@ -138,9 +140,13 @@ class ElevationMemory:
 class Affordance:
     """The trained network, ready to judge a walk ahead."""
 
-    def __init__(self, path=None, refuse_p=M.REFUSE_P):
+    def __init__(self, path=None, refuse_p=infer.REFUSE_P):
         from cyberdog import paths
-        self.net, self.info = M.load(path or paths.MODELS_DIR / "affordance" / "mlp.pt")
+        if path is None:
+            # The .npz if it has been exported; else the .pt, which needs torch.
+            d = paths.MODELS_DIR / "affordance"
+            path = d / "mlp.npz" if (d / "mlp.npz").exists() else d / "mlp.pt"
+        self.net, self.info = infer.load(path)
         self.refuse_p = refuse_p
 
     def judge(self, patch, target):
@@ -149,7 +155,7 @@ class Affordance:
         seen = float(np.isfinite(patch).mean())
         if seen < MIN_SEEN:
             return None, None, seen
-        cls, probs = M.classify(self.net, patch[None], np.asarray([target], np.float32),
+        cls, probs = infer.classify(self.net, patch[None], np.asarray([target], np.float32),
                                 self.refuse_p)
         return int(cls[0]), probs[0], seen
 
@@ -169,3 +175,48 @@ def ahead(pose, xy, reach=1.2, min_d=data.TARGET_D[0]):
         return None
     k = min(reach, d) / d
     return fx * k, fy * k
+
+
+REACH_M = 1.2           # metres from the dog at which a candidate path is judged
+
+
+def leaves(path, xy, r=REACH_M, step=0.05):
+    """The first point of `path` at least `r` from `xy`, or its last point if
+    it never gets that far. Sampled along each segment, not just at the
+    vertices: VAMOS's points are 0.5-2 m apart, so the first vertex past `r`
+    can be well past where the path crosses it."""
+    for a, b in zip(path, path[1:]):
+        n = max(int(math.dist(a, b) / step), 1)
+        for k in range(1, n + 1):
+            p = (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+            if math.dist(p, xy) >= r:
+                return p
+    return tuple(path[-1])
+
+
+def judge_paths(aff, patch, pose, paths, reach=REACH_M):
+    """Class name (data.CLASS_NAMES) for each candidate path, None where the
+    network cannot say: too little of the patch seen, or the path's first
+    `reach` metres turning off the bearings it was trained on.
+
+    The network judges a straight walk from the dog to one point
+    (data.path_cells), so each path is judged where it first leaves a circle
+    of `reach` round the dog -- the part of it the dog walks next, and inside
+    the 1.6 m the patch can see. One patch for all of them: the patch is
+    about the dog's pose, not the path. One batched call to the network.
+    """
+    out = [None] * len(paths)
+    if float(np.isfinite(patch).mean()) < MIN_SEEN:
+        return out
+    idx, targets = [], []
+    for k, p in enumerate(paths):
+        t = ahead(pose, leaves(p, pose[:2], reach), reach=reach) if len(p) >= 2 else None
+        if t is not None:
+            idx.append(k)
+            targets.append(t)
+    if targets:
+        cls, _ = infer.classify(aff.net, np.repeat(patch[None], len(targets), axis=0),
+                            np.asarray(targets, np.float32), aff.refuse_p)
+        for k, c in zip(idx, cls):
+            out[k] = data.CLASS_NAMES[int(c)]
+    return out
