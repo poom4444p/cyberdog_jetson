@@ -325,6 +325,25 @@ def prompt_goal(text_prompt):
     return None if processor.tokenizer.unk_token_id in ids else tuple(ids)
 
 
+def warm_up(calls):
+    """CyberDog: answer `calls` dummy requests before serving, as the brain asks.
+
+    The first call after a start paid for CUDA/cuBLAS setup and the caching
+    allocator: 2.9-3.7 s on the J4012 against ~1.8 s after (HIL 2026-11-17),
+    so a dog's first answer came late. Same settings as vamos_client: a
+    640x480 frame, a goal prompt, 20 tokens, beam search (5 beams, 5 paths)
+    -- the loc head and the goal tail when they are on. Before uvicorn starts,
+    so /health only answers once the server is warm.
+    """
+    if model is None or calls <= 0:
+        return
+    frame = Image.new("RGB", (640, 480), (128, 128, 128))
+    for k in range(calls):
+        t = time.perf_counter()
+        generate_trajectories(frame, "Navigate to x=<loc0512>, y=<loc0600>.", 20, 0, 100, 5, 5)
+        logger.info(f"warm-up {k + 1}/{calls}: {(time.perf_counter() - t) * 1000:.0f} ms")
+
+
 def loc_head_generate(model_input, max_tokens, num_beams, num_samples, goal=None):
     """Beam search through LocHeadDecoder; None -> the caller uses generate().
 
@@ -864,6 +883,9 @@ if __name__ == "__main__":
     parser.add_argument("--loc_head", action="store_true",
                         help="Beam search over <loc> tokens + EOS only (loc_head.py): "
                              "skips 256k of the head's rows and their softmax/topk")
+    parser.add_argument("--warmup", type=int, default=2, metavar="N",
+                        help="Answer N dummy requests before serving, so the first real "
+                             "one is not ~1.5 s slower (default 2; 0 = off)")
     parser.add_argument("--goal_tail", action="store_true",
                         help="With --loc_head: decode 4 points, then end every path at the "
                              "prompt's goal + EOS (3 decode steps fewer; loc_head.py)")
@@ -885,6 +907,7 @@ if __name__ == "__main__":
         success, message = load_model(args.model_path, args.use_fp32, args.trust_remote_code)
         if success:
             logger.info(f"Model loaded successfully: {message}")
+            warm_up(args.warmup)
         else:
             logger.error(f"Failed to load model: {message}")
             logger.error("Server will start but model endpoints will not work until model is loaded via /load_model endpoint")
