@@ -400,7 +400,7 @@ class Crowd:
         if n <= 0:
             return
         rng = self._rng = random.Random(seed * 1000 + floor)
-        boxes = obstacles.boxes(floor)
+        boxes = obstacles.corridor_boxes(floor)
         for _ in range(min(n, POOL)):
             w = self._make(rng, boxes)
             if w is not None:
@@ -487,7 +487,7 @@ class Crowd:
         # dog meets crossers from its left and from its right.
         if rng.random() < CROSS_P:
             x1 = self._slant(rng, w.x)
-            if not self._blocked(w.x, obstacles.boxes(self.floor), x1):
+            if not self._blocked(w.x, obstacles.corridor_boxes(self.floor), x1):
                 far = LANE_Y[1] if w.y < sum(LANE_Y) / 2 else LANE_Y[0]
                 w.reset((w.x, w.y), (x1, far), rng.uniform(*SPEED),
                         rng.uniform(*PAUSE), "crossing")
@@ -528,7 +528,7 @@ class Crowd:
         is always walking and the dog meets a continuous wall of people, which
         is not a building, it is a turnstile.
         """
-        boxes = obstacles.boxes(self.floor)
+        boxes = obstacles.corridor_boxes(self.floor)
         for _ in range(tries):
             fresh = self._make(self._rng, boxes)
             if fresh is None:

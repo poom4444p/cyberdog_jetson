@@ -136,7 +136,7 @@ def test_walkers_go_round_crates_not_through():
     # Room 101 seed 6, aware: a walker drifted onto a line through the floor-1
     # trolley and walked through it. Every line through a crate, either way,
     # either axis: never inside it, and never a jump sideways.
-    boxes = obstacles.boxes(1)
+    boxes = obstacles.corridor_boxes(1)
     legs = [((30.0, y), (17.0, y)) for y in (9.1, 9.4, 9.7)]
     legs += [((17.0, 9.4), (30.0, 9.4))]
     legs += [((x, ped.LANE_Y[0]), (x, ped.LANE_Y[1])) for x in (23.5, 24.0, 24.5)]
@@ -154,7 +154,7 @@ def test_walkers_go_round_crates_not_through():
 
 def test_floor2_south_lane_clears_the_crate():
     # The south lane (y 8.60) used to clip the floor-2 crate (y from 8.75).
-    boxes = obstacles.boxes(2)
+    boxes = obstacles.corridor_boxes(2)
     w = Walker((15.0, ped.SIDE_LANES[0]), (40.0, ped.SIDE_LANES[0]), 1.2, 0.0, "along", boxes=boxes)
     for _ in range(600):
         w.step(0.05)

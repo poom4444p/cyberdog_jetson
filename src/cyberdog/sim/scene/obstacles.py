@@ -84,6 +84,8 @@ the two failures it cannot see -- a box the routes have quietly stopped touching
 is worse than no box, because it still looks like a test, and a box that seals
 the side a doorway is on breaks that route without ever being mentioned.
 """
+import math
+
 from cyberdog.sim.scene.levels import floor_z
 
 # Warm, so it reads as "not part of the building" at a glance in the video --
@@ -140,9 +142,82 @@ for _floor, _items in OBSTACLES.items():
              f"dog walks -- it would sit in the corridor and never be in the way")
 
 
-def boxes(floor):
-    """(x0, x1, y0, y1, height, name) for everything standing on this floor."""
+# The wing corridor (x 37.5 - 40.5, running north from the T-junction) gets
+# its own clutter, under the same rules turned through 90 degrees: straddle the
+# line the dog walks, leave MIN_GAP on at least one side, stay off the doors.
+# Kept apart from OBSTACLES because pedestrians.py and the selftests reason
+# about the main corridor only -- a wing box at x=39 would read to them as a
+# crate across the main corridor at x=39.
+WING_CORRIDOR_X = (37.925, 40.075)     # inflated, as CORRIDOR_Y
+WING_WALL_X = (37.65, 40.35)
+WING_CENTRELINE = 39.0
+# Door spans on the wing corridor walls (y), from generate_building's two
+# doors per room; nothing may stand in front of one.
+WING_DOORS_Y = [y0 + off for y0 in (19.0, 25.0, 31.0) for off in (1.5, 4.5)]
+
+WING_OBSTACLES = {
+    # On the way to the cafeteria: between W2/E2's doors.
+    1: [(38.70, 39.40, 33.30, 34.50, 0.95, "wing_trolley")],
+    # On the way to the mechanical engineering lab: between W0/E0's doors.
+    2: [(38.75, 39.30, 22.00, 22.55, 0.80, "wing_bin")],
+}
+
+for _floor, _items in WING_OBSTACLES.items():
+    for _x0, _x1, _y0, _y1, _h, _name in _items:
+        assert WING_WALL_X[0] <= _x0 < _x1 <= WING_WALL_X[1], \
+            f"{_name} on floor {_floor} is outside the wing corridor walls"
+        _west = min(_x0, WING_CORRIDOR_X[1]) - WING_CORRIDOR_X[0]
+        _east = WING_CORRIDOR_X[1] - max(_x1, WING_CORRIDOR_X[0])
+        assert max(_west, _east) >= MIN_GAP, \
+            f"{_name} on floor {_floor} leaves {_west:.2f} m west and {_east:.2f} m east"
+        assert _x0 <= WING_CENTRELINE <= _x1, \
+            f"{_name} on floor {_floor} does not straddle the wing corridor's centreline"
+        assert all(_y1 <= d - 0.6 or _y0 >= d + 0.6 for d in WING_DOORS_Y), \
+            f"{_name} on floor {_floor} stands in front of a wing room door"
+
+# Geom names are obs{floor}_{name}, so a name may appear once per floor.
+for _floor in set(OBSTACLES) | set(WING_OBSTACLES):
+    _names = [b[5] for b in OBSTACLES.get(_floor, []) + WING_OBSTACLES.get(_floor, [])]
+    assert len(_names) == len(set(_names)), f"repeated obstacle name on floor {_floor}: {_names}"
+
+# Doors left half open. Doors move, so the map has every doorway open and the
+# leaf is for the dog to perceive. (hinge_x, hinge_y, length, yaw_deg): the
+# leaf runs from the hinge in direction yaw. The physics lab's (floor 3, W1)
+# first door is hinged at its south jamb and swung 45 degrees into the room,
+# so a dog walking straight in meets it 0.6 m past the threshold.
+DOOR_LEAVES = {
+    3: [(37.40, 25.90, 1.2, 135.0, "door")],
+}
+LEAF_T, LEAF_H = 0.04, 2.0
+DOOR_COLOUR = "0.58 0.44 0.30 1"
+
+
+def corridor_boxes(floor):
+    """The main corridor's boxes only -- what pedestrians.py walks around."""
     return OBSTACLES.get(floor, [])
+
+
+def boxes(floor):
+    """(x0, x1, y0, y1, height, name) for every box standing on this floor:
+    the main corridor's and the wing's. Door leaves are not boxes (they are
+    turned), so they are not in here."""
+    return OBSTACLES.get(floor, []) + WING_OBSTACLES.get(floor, [])
+
+
+def leaf_geoms(floor, z):
+    """Half-open door leaves as rotated boxes. A quaternion rather than euler,
+    because the angle unit depends on whichever <compiler> wins in the model."""
+    out = []
+    for i, (hx, hy, length, yaw, name) in enumerate(DOOR_LEAVES.get(floor, [])):
+        a = math.radians(yaw)
+        cx, cy = hx + math.cos(a) * length / 2, hy + math.sin(a) * length / 2
+        out.append(
+            f'<geom name="obs{floor}_{name}{i}" type="box" '
+            f'pos="{cx:.3f} {cy:.3f} {z + LEAF_H / 2:.3f}" '
+            f'size="{length / 2:.3f} {LEAF_T / 2:.3f} {LEAF_H / 2:.3f}" '
+            f'quat="{math.cos(a / 2):.5f} 0 0 {math.sin(a / 2):.5f}" '
+            f'rgba="{DOOR_COLOUR}"/>')
+    return out
 
 
 def geoms(floor, z0=None):
@@ -159,4 +234,4 @@ def geoms(floor, z0=None):
             f'pos="{(x0 + x1) / 2:.3f} {(y0 + y1) / 2:.3f} {z + h / 2:.3f}" '
             f'size="{(x1 - x0) / 2:.3f} {(y1 - y0) / 2:.3f} {h / 2:.3f}" '
             f'rgba="{COLOUR}"/>')
-    return out
+    return out + leaf_geoms(floor, z)
