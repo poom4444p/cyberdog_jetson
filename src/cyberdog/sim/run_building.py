@@ -93,6 +93,21 @@ STEP_V = 0.4              # m/s in and out of the car -- slower than corridor pa
 EXIT_TURN_MIN = math.radians(35)  # less than this off straight out: the leg turns as it walks
 EXIT_TURN_W = 0.5         # rad/s: the turn, scripted, slow enough to follow on a handle
 EXIT_SHIFT = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)   # m from WAIT_XY towards the way on
+# Out of the lift, the dog and its user leave together and clear the door
+# before anything stops them. Out of the floor-3 lift for the server room the
+# dog turned in front of the door and then, on its first tick in the corridor,
+# stopped for somebody walking past 1.9 m off -- its user, 1.1 m behind, still
+# standing in the doorway (HIL 11-17 12:29). Somebody about to walk across the
+# way out is waited for in the car, doors open, where the two of them stand
+# together (exit_wait); out of it, until EXIT_CLEAR_M from the waiting point,
+# only somebody right in front of the dog stops it (right_in_front).
+EXIT_CLEAR_M = 1.8        # m from lift.WAIT_XY that is clear of the door
+EXIT_FRONT_M = 1.5        # m ahead, and
+EXIT_LANE_M = 0.6         # m either side of the dog's heading: "right in front"
+EXIT_SEE_T = 1.0          # s on that a walker is looked at, as well as now
+EXIT_ZONE_R = 1.2         # m round the way out a walker must keep, from the car
+EXIT_WAIT_T = 3.0         # s ahead the car looks at walkers' paths
+EXIT_WAIT_MAX_S = 20.0    # s, then out anyway: a corridor that never clears
 STAIR_V = 0.25            # m/s along a flight: a tread at a time, a third of corridor pace
 # CE-RRT* searches on the control thread, ~160 ms each on the J4012 (25 W).
 # A search that found nothing used to be repeated on every tick, at both of
@@ -328,6 +343,29 @@ def passes_by(xy, yaw, t, horizon=None):
         return False
     end = lat + lat_v * (PASS_HORIZON if horizon is None else horizon)
     return lat * end > 0 and min(abs(lat), abs(end)) >= PASS_LAT
+
+
+def right_in_front(xy, yaw, t):
+    """Is track `t` right in front of the dog: EXIT_FRONT_M ahead at most,
+    within EXIT_LANE_M of its heading -- now, or EXIT_SEE_T on? The one person
+    still waited for while clearing the lift door (see EXIT_CLEAR_M)."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    for px, py in ((t.x, t.y), t.predict(EXIT_SEE_T)):
+        dx, dy = px - xy[0], py - xy[1]
+        ahead, lat = dx * c + dy * s, -dx * s + dy * c
+        if 0.0 < ahead <= EXIT_FRONT_M and abs(lat) <= EXIT_LANE_M:
+            return True
+    return False
+
+
+def crossing_exit(t, way_out):
+    """Will walker `t` come within EXIT_ZONE_R of the way out of the lift
+    (`way_out`, points from the door to EXIT_CLEAR_M out) in the next
+    EXIT_WAIT_T? Asked from inside the car, where the dog is not moving."""
+    if not t.moving:
+        return False
+    return any(closest_approach(p, (0.0, 0.0), (t.x, t.y), (t.vx, t.vy), EXIT_WAIT_T)
+               - min(t.r, 0.4) < EXIT_ZONE_R for p in way_out)
 
 
 def blind_ahead(scan, pose, behind=False):
@@ -922,6 +960,7 @@ SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
                           # kept by any step easing adds. PED_NEAR plus a margin.
 GLIDE_TOL_M, GLIDE_TOL_YAW = 0.15, 0.20   # m, rad: near enough the end of a glide()
 GLIDE_SETTLE_S = 6.0      # s a board may take, after a glide's line, to get there
+GLIDE_STUCK_M, GLIDE_STUCK_S = 0.03, 1.0  # m in s: less headway is a board that will get no nearer
 HOLD_TURN_S = 3.0         # seconds a turn that would put the person on the handle
                           # into a wall (closer than HANDLER_R) is held, when no
                           # eased or sideways version avoids it, before the
@@ -1317,6 +1356,7 @@ class Run:
         self._doors = {}          # floor -> [(name, door_xy)], for the captions
         self.floor = START_FLOOR
         self.in_lift = False
+        self.exit_from = None     # floor just stepped out of the lift onto: see EXIT_CLEAR_M
         self.on_stairs = False
         self.stair_flights = self.stair_steps = 0
         self.behind = False
@@ -3003,6 +3043,8 @@ class Run:
                 continue                                 # the board sees too little room that way
             s_ = v * EVADE_STEP_T
             ex, ey = x + lx * s_, y + ly * s_
+            if lift.in_doorway((ex, ey)):
+                continue                                 # back into the lift's mouth: see EXIT_CLEAR_M
             if (live.static_at(ex, ey) < floors[0] or live.detected_at(ex, ey) < floors[1]
                     or nose(ex, ey) < floors[2]
                     or self.handler_room(live, ex, ey, yaw) < floors[3]):
@@ -3046,6 +3088,8 @@ class Run:
         """
         self.floor = floor
         self.robot.set_height(levels.floor_z(floor))
+        if self.exit_from != floor:
+            self.exit_from = None            # not a leg out of the lift: see EXIT_CLEAR_M
         # An answer still on its way from the last leg is about a corridor the
         # dog has left -- another floor, or the far side of a lift ride.
         if self.pending is not None:
@@ -3481,7 +3525,15 @@ class Run:
             # ...and the one being followed or overtaken is not waited for or
             # gone round either: follow() has them.
             led = behind + ([lead] if lead is not None else [])
-            round_to, close = (self.go_round(live, tracks, (x, y, yaw), waypoints[i:],
+            # Just out of the lift: on, clear of the door, together. Only
+            # somebody right in front stops the dog there (see EXIT_CLEAR_M);
+            # the rest are still in every plan and every step aside.
+            if self.exit_from == floor and math.dist((x, y), lift.WAIT_XY) >= EXIT_CLEAR_M:
+                self.exit_from = None
+            if self.exit_from == floor:
+                led = led + [t for t in tracks
+                             if t not in led and not right_in_front((x, y), yaw, t)]
+            round_to, close =(self.go_round(live, tracks, (x, y, yaw), waypoints[i:],
                                              gates, n, speed, ignore=led)
                                if self.planner == "cerrt" else (None, None))
             if round_to is None and close is not None:
@@ -3819,9 +3871,20 @@ class Run:
         # with it 1.2 m and 1.3 rad short of the floor-3 lift's waiting spot --
         # its user pinned against the car and the wall, and the leg on from
         # there never got going. Walk on to the end of the line, for a while.
-        for _ in range(int(GLIDE_SETTLE_S / self.robot.CONTROL_DT)):
+        # ...but not standing in the lift door for a step the board will not
+        # make: out of the floor-3 car for the server room, the last 0.27 m
+        # was sideways, the board never took it, and the dog stood in front
+        # of the door 3-4 s, its user in the doorway (HIL 11-17). No headway
+        # for GLIDE_STUCK_S: it is where it is going to get.
+        moved = (self.robot.get_pose(), 0)
+        for k in range(int(GLIDE_SETTLE_S / self.robot.CONTROL_DT)):
             x, y, th = self.robot.get_pose()
             if math.dist((x, y), to_xy) <= GLIDE_TOL_M and abs(wrap(yaw - th)) <= GLIDE_TOL_YAW:
+                break
+            (mx, my, mth), at = moved
+            if math.dist((x, y), (mx, my)) > GLIDE_STUCK_M or abs(wrap(th - mth)) > GLIDE_TOL_YAW / 2:
+                moved = ((x, y, th), k)
+            elif (k - at) * self.robot.CONTROL_DT >= GLIDE_STUCK_S:
                 break
             self.handle_wait()
             self.robot.place(to_xy, yaw, z=z)
@@ -3905,12 +3968,11 @@ class Run:
         self.robot.set_height(z1)
         self.floor = to_floor
         self.say(f"Floor {to_floor}. Doors opening.")
-        for _ in range(int(WAIT_S * FPS)):
-            self.frame()
         # Out west into the corridor before the velocity loop takes over, so
         # the first thing it does is not a turn into the shaft wall -- and,
         # when the way on is round a corner, turned to it here: see EXIT_TURN_MIN.
         spot, heading = self.exit_spot(to_floor, onward)
+        self.exit_wait(to_floor, spot, heading)
         self.glide(spot, math.pi, z1)
         turn = wrap(heading - math.pi)
         if turn:
@@ -3918,6 +3980,38 @@ class Run:
             self.pivot(math.pi, heading, z1, seconds=abs(turn) / EXIT_TURN_W)
             self.glide(spot, heading, z1)          # a board lags the turn: let it finish
         self.in_lift = False
+        self.exit_from = to_floor
+
+    def exit_wait(self, floor, spot, heading):
+        """Doors open: stand in the car, the person on the handle with the
+        dog, WAIT_S at least, and on while somebody is about to walk across
+        the way out (crossing_exit) -- EXIT_WAIT_MAX_S at most. Watched with
+        the LiDAR the whole time, so the tracker has walkers' pace by the time
+        the dog steps out. See EXIT_CLEAR_M."""
+        x, y, yaw = self.robot.get_pose()
+        ux, uy = math.cos(heading), math.sin(heading)
+        way_out = [lift.WAIT_XY, spot] + [(spot[0] + d * ux, spot[1] + d * uy)
+                                         for d in (0.6, 1.2, EXIT_CLEAR_M)]
+        live = self.clearance(floor)
+        said = False
+        for n in range(int(EXIT_WAIT_MAX_S * FPS)):
+            self.handle_wait()
+            self.step_crowd()
+            live.update(self.robot.get_scan(), self.robot.z, (x, y),
+                        origin=(x, y, self.robot.z + MOUNT_H))
+            tracks = self.tracker.update(live.points)
+            self.frame()
+            who = next((t for t in tracks if crossing_exit(t, way_out)), None)
+            if who is None:
+                if n >= WAIT_S * FPS:
+                    break
+                continue
+            if not said:
+                self.say(describe_person((x, y), yaw, (who.x, who.y),
+                                         (who.vx, who.vy)) + ". Waiting.")
+                self.ped["yields"] += 1
+                said = True
+            self.ped["waited"] += 1
 
     def exit_spot(self, floor, onward):
         """(where to stand outside the car, the heading to turn to there).
