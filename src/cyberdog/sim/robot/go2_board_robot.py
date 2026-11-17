@@ -223,6 +223,9 @@ class BoardTwinRobot(MujocoRobot):
                  board_host=None, listen=None, lift=None, clouds=True):
         self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
         self._no_state_since = None    # board clock since when no state came, in _follow
+        # The board's pose put back on the map (sensing/map_fix.py), or None:
+        # run_building sets it, and tells it the floor's field each tick.
+        self.map_fix = None
         self.lift = lift          # LiftLink, for rides; None: no floor but the first
         # The Mid-360 as the board sees it, forwarded on 9872: what the brain
         # perceives with, as on the dog. clouds=False keeps the twin's own
@@ -307,6 +310,8 @@ class BoardTwinRobot(MujocoRobot):
         called every tick with the car floor's height, for the video."""
         if self.lift is None:
             raise NotImplementedError("no lift link: --robot go2_board needs go2_world's lift")
+        if self.map_fix is not None:
+            self.map_fix.use(None)             # another floor: its own correction, from none
         self.board.set_velocity(0.0, 0.0, 0.0)
         self.board.request("stand", until="STAND", timeout=5.0)
         s = self.board.board_state()
@@ -360,6 +365,8 @@ class BoardTwinRobot(MujocoRobot):
             return
         self._no_state_since = None
         x, y, yaw = self.board._to_map(s)
+        if self.map_fix is not None:
+            x, y, yaw = self.map_fix.pose(x, y, yaw)
         MujocoRobot.place(self, (x, y), yaw)
         if s["mode"] != "WALK":
             why = f": {s['tripped']}" if s.get("tripped") else ""
@@ -391,12 +398,18 @@ class BoardTwinRobot(MujocoRobot):
         c = self.clouds.poll()
         if c is None or self.board.clock() - self._cloud_seen(c) > self.CLOUD_STALE_S:
             return np.empty((0, 3))
-        x, y, th = self.board.pose_at(c.t) or self.get_pose()
+        # The board's own map pose, never the twin's: that one is corrected.
+        x, y, th = self.board.pose_at(c.t) or self.board.get_pose()
+        if self.map_fix is not None:
+            x, y, th = self.map_fix.pose(x, y, th)
         cs, sn = math.cos(th), math.sin(th)
         p = c.xyz.astype(float)
-        return np.column_stack((x + cs * p[:, 0] - sn * p[:, 1],
-                                y + sn * p[:, 0] + cs * p[:, 1],
-                                self.z + p[:, 2]))
+        out = np.column_stack((x + cs * p[:, 0] - sn * p[:, 1],
+                               y + sn * p[:, 0] + cs * p[:, 1],
+                               self.z + p[:, 2]))
+        if self.map_fix is not None:
+            out = self.map_fix.refine(out, (x, y))
+        return out
 
     def _cloud_seen(self, c):
         """When this cloud first arrived here, on this side's clock."""

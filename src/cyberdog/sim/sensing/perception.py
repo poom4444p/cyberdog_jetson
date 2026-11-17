@@ -75,6 +75,15 @@ FACE_EXPLAINED = 0.15   # metres from a real wall face that is still the wall
 GRID_INFLATION = 0.25   # map_config grid_inflation (build_scene.INFLATION)
 WALL_ONLY_TOL = 0.05    # m of grid rounding between the two fields
 MIN_H, MAX_H = 0.08, 1.8  # ankle height to head height, above the floor
+# ...and MIN_H rises with distance from the dog, FLOOR_SLOPE a metre. On the
+# board the cloud is levelled by the Mid-360's own IMU, and a level a degree
+# out puts the floor 7 m off at 0.12 m: over MIN_H, unexplained, and moving
+# with the dog. The tracker read those patches as people walking -- 81 % of
+# the unexplained returns past 4.5 m were 0.08-0.25 m high, and the dog said
+# "Someone coming towards us" 10-13 times with nobody walking (HIL, --stand
+# x3, PEOPLE=0, 11-17). 2 deg: replayed, none left; the people still seen as
+# often. Low things far off are seen as they come nearer (0.15 m at 2 m).
+FLOOR_SLOPE = 0.035
 WINDOW = 8.0            # half-width of the local costmap, metres
 SHADOW = 1.0            # how far behind a return to treat as unknown, metres
 # Thresholds a displaced goal must satisfy. Deliberately modest: the corridor
@@ -158,7 +167,6 @@ class LiveClearance:
         self.local = None               # (edt, x0, y0) while something is seen
         self.still = None               # ...the same, minus anything walking
         self.points = np.empty((0, 2))  # the unexplained returns, for drawing
-        self.heights = np.empty(0)      # ...and each one's height above the floor
         self._scan = None               # this tick's returns, for `exclude`
         self._flat = None               # this tick's flat things, [K, 2], see update
         # (col, row) world cell -> sim time last seen, as a grid: `seen[r, c]`
@@ -199,14 +207,14 @@ class LiveClearance:
         `points`, which the tracker and the drawing read."""
         self.local = self.still = None
         self.points = np.empty((0, 2))
-        self.heights = np.empty(0)
         self._scan = None
         self._flat = (np.asarray(flat, float).reshape(-1, 2)
                       if flat is not None and len(flat) else None)
-        px = py = pz = np.empty(0)
+        px = py = np.empty(0)
         if len(points):
             rel = points[:, 2] - floor_z
-            m = (rel > MIN_H) & (rel < MAX_H)
+            far = np.hypot(points[:, 0] - centre[0], points[:, 1] - centre[1])
+            m = (rel > MIN_H + FLOOR_SLOPE * far) & (rel < MAX_H)
             if m.any():
                 qx, qy = points[m, 0], points[m, 1]
                 # Anything standing where the map already says "not free" is a
@@ -218,11 +226,10 @@ class LiveClearance:
                 face, static = self._face(qx, qy), self._static(qx, qy)
                 wall_only = static >= face - GRID_INFLATION - WALL_ONLY_TOL
                 known = np.where(wall_only, face < FACE_EXPLAINED, static <= EXPLAINED)
-                px, py, pz = qx[~known], qy[~known], rel[m][~known]
+                px, py = qx[~known], qy[~known]
         if len(px) == 0 and self._flat is None:
             return
         self.points = np.column_stack([px, py])
-        self.heights = pz
         self._scan = (px, py, centre, origin)
         self.local = self.still = self._field(px, py, centre, origin)
 
