@@ -69,6 +69,8 @@ shared_prefill = True
 shared_prefill_calls = 0
 # CyberDog: see loc_head.py. --loc_head scores only <loc> tokens + EOS.
 loc_head = False
+# CyberDog: see loc_head.py (goal tail). --goal_tail ends every path at the prompt's goal.
+goal_tail = False
 loc_decoder = None
 loc_head_lock = threading.Lock()   # one request at a time through the decoder
 return_trajectories = False
@@ -314,7 +316,16 @@ def load_model(model_path, use_fp32=False, trust_remote_code=True):
         
         return False, f"Error loading model: {str(e)}"
 
-def loc_head_generate(model_input, max_tokens, num_beams, num_samples):
+def prompt_goal(text_prompt):
+    """The goal's (x, y) <loc> token ids in "Navigate to x=<locXXXX>, y=<locYYYY>...", or None."""
+    m = re.search(r"x=<loc(\d{4})>, y=<loc(\d{4})>", text_prompt)
+    if m is None:
+        return None
+    ids = processor.tokenizer.convert_tokens_to_ids([f"<loc{m.group(1)}>", f"<loc{m.group(2)}>"])
+    return None if processor.tokenizer.unk_token_id in ids else tuple(ids)
+
+
+def loc_head_generate(model_input, max_tokens, num_beams, num_samples, goal=None):
     """Beam search through LocHeadDecoder; None -> the caller uses generate().
 
     Any failure turns --loc_head off for good (traceback in the log).
@@ -327,7 +338,7 @@ def loc_head_generate(model_input, max_tokens, num_beams, num_samples):
                     or loc_decoder.num_beams != num_beams):
                 loc_decoder = LocHeadDecoder(model, processor.tokenizer, num_beams=num_beams)
             return loc_decoder.generate(model_input, max_new_tokens=max_tokens,
-                                        num_return_sequences=num_samples)
+                                        num_return_sequences=num_samples, goal=goal)
         except Exception:
             logger.exception("loc head failed; using generate() from now on")
             loc_decoder = None
@@ -380,8 +391,10 @@ def generate_trajectories(image, text_prompt, max_tokens, temperature, top_k, nu
             t_gen = time.perf_counter()
             outputs = None
             if loc_head and num_beams > 1 and temperature == 0 and num_samples <= num_beams:
-                outputs = loc_head_generate(model_input, max_tokens, num_beams, num_samples)
-                how = "loc head"
+                goal = prompt_goal(text_prompt) if goal_tail else None
+                outputs = loc_head_generate(model_input, max_tokens, num_beams, num_samples, goal)
+                tail = loc_decoder.last_tail if loc_decoder is not None else None
+                how = "loc head" + {"used": " + goal tail", "fallback": " + goal tail FELL BACK"}.get(tail, "")
             if outputs is None:
                 outputs = model.generate(
                     **model_input,
@@ -851,10 +864,16 @@ if __name__ == "__main__":
     parser.add_argument("--loc_head", action="store_true",
                         help="Beam search over <loc> tokens + EOS only (loc_head.py): "
                              "skips 256k of the head's rows and their softmax/topk")
+    parser.add_argument("--goal_tail", action="store_true",
+                        help="With --loc_head: decode 4 points, then end every path at the "
+                             "prompt's goal + EOS (3 decode steps fewer; loc_head.py)")
     
     args = parser.parse_args()
     shared_prefill = not args.no_shared_prefill
     loc_head = args.loc_head
+    goal_tail = args.goal_tail
+    if goal_tail and not loc_head:
+        parser.error("--goal_tail ends the loc head's beams; it needs --loc_head")
     
     # Use environment variables with fallbacks (like NaVILA server)
     host = args.host or os.environ.get("BIND_HOST", "0.0.0.0")
