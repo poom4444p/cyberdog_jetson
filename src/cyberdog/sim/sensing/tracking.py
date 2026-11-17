@@ -85,7 +85,8 @@ CLAIM_R = 0.40          # metres round where a walker is predicted to be: their
 class Track:
     """One clustered thing, over time."""
 
-    __slots__ = ("x", "y", "vx", "vy", "r", "age", "missed", "past", "dt", "walked")
+    __slots__ = ("x", "y", "vx", "vy", "r", "age", "missed", "past", "dt", "walked",
+                 "tall", "low")
 
     def __init__(self, x, y, r, dt):
         self.x, self.y, self.r, self.dt = x, y, r, dt
@@ -94,6 +95,12 @@ class Track:
         self.missed = 0
         self.past = deque([(x, y)], maxlen=WINDOW)
         self.walked = False         # ever moving: a person, whatever they do next
+        # Height, judged by the caller (run_building.judge_height): `tall`
+        # for good once any of it was seen above a crate's height; `low`
+        # counts the ticks it was seen where the LiDAR reaches a person's
+        # chest and none of it was up there.
+        self.tall = False
+        self.low = 0
 
     def observe(self, x, y, r):
         """Where it is now, and therefore how fast it has been going."""
