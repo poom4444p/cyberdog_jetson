@@ -19,6 +19,23 @@ Beam search: a line-by-line port of transformers 5.x _beam_search for batch 1
 (length_penalty 1.0, early_stopping False, no logits processors, one EOS).
 With subset=False (the full head) it must give generate()'s paths exactly:
 that is how the port is checked.
+
+goal tail (generate(goal=...), vlm_server --goal_tail): VAMOS's last point is
+the goal the prompt names, then EOS -- 80/80 paths on the J4012 (16 prompts x
+5 beams). Decoding it costs 3 of the 10 decode steps (~150 ms each at 25W,
+GPU-bound). With a goal, the model decodes the first GOAL_TAIL_AT tokens (4
+points) and every running beam is finished with <goal x><goal y><EOS> at
+log-probability 0, scored by the same length-normalised rule as a real EOS.
+What it changes: a path that would not have ended at the goal now does.
+
+Guard: the tail is used only when the answer still has VAMOS's shape. If the
+<loc> head is off (subset=False), there is no room for the tail, or the model
+ended any kept beam early (EOS inside the first 4 points), the call decodes in
+full instead and the fallback is counted (tail_used / tail_fallback,
+last_tail). Any early end, not only one that would rank: the tail scores its
+3 tokens at log-probability 0, so it would rank the full paths a little too
+well against an early end. A retrained model with another answer
+shape then shows up in the log, not as quietly wrong paths.
 """
 import logging
 
@@ -26,11 +43,16 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+GOAL_TAIL_AT = 8          # generated tokens the model decodes before the goal tail: 4 points
+
 
 class LocHeadDecoder:
     def __init__(self, model, tokenizer, num_beams=5, subset=True):
         self.model = model
         self.num_beams = num_beams
+        self.tail_used = 0                                     # goal tail: calls it ended
+        self.tail_fallback = 0                                 # calls decoded in full instead
+        self.last_tail = None                                  # "used", "fallback" or None
         gc = model.generation_config
         eos = gc.eos_token_id
         eos = eos if isinstance(eos, int) else (eos[0] if eos and len(eos) == 1 else None)
@@ -51,13 +73,24 @@ class LocHeadDecoder:
             self.head = head
         self.V = self.head.shape[0]
 
+    def _fallback(self, why):
+        self.tail_fallback += 1
+        self.last_tail = "fallback"
+        logger.warning(f"goal tail not used ({why}): decoding in full "
+                       f"[{self.tail_fallback} fallback(s), {self.tail_used} tail(s) so far]")
+
     def _logits(self, hidden):
         return torch.nn.functional.linear(hidden[:, -1, :], self.head)
 
     @torch.no_grad()
-    def generate(self, model_input, max_new_tokens=20, num_return_sequences=None):
+    def generate(self, model_input, max_new_tokens=20, num_return_sequences=None, goal=None):
+        """Beam search; `goal` (x token id, y token id) ends every path there (goal tail)."""
         n = self.num_beams
         nret = num_return_sequences or n
+        self.last_tail = None
+        if goal is not None and self.ids is None:
+            goal = None                                        # full head: answer shape not guaranteed
+            self._fallback("the <loc> head is off")
         ids = model_input["input_ids"]
         if ids.shape[0] != 1:
             raise ValueError("batch 1 only")
@@ -135,6 +168,32 @@ class LocHeadDecoder:
             beam_idx = running_beam_indices[0, :, cur_len - P].long()
             cur_len += 1
 
+            if goal is not None and cur_len - P == GOAL_TAIL_AT and cur_len + 3 > max_length:
+                goal = None
+                self._fallback(f"max_new_tokens {max_new_tokens} leaves no room for the tail")
+            if goal is not None and cur_len - P == GOAL_TAIL_AT and bool(is_sent_finished.any()):
+                goal = None                                    # not the 5-point shape the tail assumes
+                self._fallback("a path ended before 4 points")
+            if goal is not None and cur_len - P == GOAL_TAIL_AT:
+                # every running beam ends <goal x><goal y><EOS>; merged with the
+                # finished ones as a real EOS would be (score / generated length)
+                tail = torch.tensor([goal[0], goal[1], self.eos], dtype=torch.int64, device=dev)
+                seq = running_sequences.clone()
+                seq[:, :, cur_len:cur_len + 3] = tail
+                idx = running_beam_indices.clone()
+                idx[:, :, cur_len - P:cur_len - P + 3] = torch.arange(
+                    n, dtype=torch.int32, device=dev)[None, :, None]
+                score = running_beam_scores / float(cur_len + 3 - P)
+                merged_seq = torch.cat((sequences, seq), dim=1)
+                merged_scores = torch.cat((beam_scores, score), dim=1)
+                merged_idx = torch.cat((beam_indices, idx), dim=1)
+                top = torch.topk(merged_scores, k=n)[1]
+                sequences = gather(merged_seq, top)
+                beam_indices = gather(merged_idx, top)
+                self.tail_used += 1
+                self.last_tail = "used"
+                break
+
             best_possible = running_beam_scores[:, :1] / float(cur_len - P)
             worst_finished = torch.where(is_sent_finished,
                                          torch.min(beam_scores, dim=1, keepdim=True)[0], -1.0e9)
@@ -151,6 +210,9 @@ class LocHeadDecoder:
                        past_key_values=cache, use_cache=True)
             logits = self._logits(out.last_hidden_state)
             del out
+
+        if goal is not None and self.last_tail is None:
+            self._fallback("the search ended before 4 points")      # answered in full anyway
 
         sequences = sequences[0, :nret]
         beam_indices = beam_indices[0, :nret]

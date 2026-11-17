@@ -19,6 +19,9 @@
 #   VAMOS_DIR VAMOS_ENV VAMOS_PORT  the VAMOS server, its venv and port
 #   VAMOS_LOC_HEAD                  1 (default) = beam search over <loc> tokens + EOS only
 #                                   (vlm_server.py --loc_head; loc_head.py); 0 = generate()
+#   VAMOS_GOAL_TAIL                 1 (default) = decode 4 points, end every path at the
+#                                   prompt's goal (vlm_server.py --goal_tail; needs
+#                                   VAMOS_LOC_HEAD=1; ~1.8 s a call, not ~2.3); 0 = decode in full
 #   VAMOS_MODE                      shadow (default) = VAMOS is asked every frame and its
 #                                   paths logged ($CYBERDOG/output/shadow_log.jsonl), the
 #                                   map route drives, no VLM speed cap (up to MAX_V);
@@ -54,6 +57,7 @@ VAMOS_DIR=${VAMOS_DIR:-$CYBERDOG/vendor/VAMOS/server}   # synced with the repo (
 VAMOS_ENV=${VAMOS_ENV:-$HOME/vamosenv}
 VAMOS_PORT=${VAMOS_PORT:-8009}
 VAMOS_LOC_HEAD=${VAMOS_LOC_HEAD:-1}
+VAMOS_GOAL_TAIL=${VAMOS_GOAL_TAIL:-1}
 VAMOS_MODE=${VAMOS_MODE:-shadow}
 IFACE=${IFACE:-l4tbr0}
 POLICY=${POLICY:-policies/go2_flat_v5}
@@ -83,7 +87,8 @@ case "${1:-}" in
     (cd "$VAMOS_DIR" || exit 1; . "$VAMOS_ENV/bin/activate"
      HF_HUB_OFFLINE=1 nohup taskset -c "$BRAIN_CORES" python vlm_server.py --host 127.0.0.1 \
          --port "$VAMOS_PORT" --model_path mateoguaman/vamos \
-         $([ "$VAMOS_LOC_HEAD" = 1 ] && echo --loc_head) > "$VAMOS_LOG" 2>&1 < /dev/null &)
+         $([ "$VAMOS_LOC_HEAD" = 1 ] && echo --loc_head) \
+         $([ "$VAMOS_GOAL_TAIL" = 1 ] && echo --goal_tail) > "$VAMOS_LOG" 2>&1 < /dev/null &)
     for _ in $(seq 1 120); do
         vamos_up && { echo "VAMOS: up"; exit 0; }
         sleep 2
