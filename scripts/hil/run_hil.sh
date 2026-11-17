@@ -37,6 +37,9 @@
 #                cap; its log copied to $OUT/shadow_log.jsonl) or steer (VAMOS steers,
 #                pace capped by its latency). See onboard.sh.
 #   BRAIN_ARGS   route: more run_building arguments, e.g. "--puddles 2 --floor-guard sim"
+#   VAMOS_STEER  route: a preference added after the goal in every VAMOS prompt
+#                (--vamos-steer), e.g. "Keep to the left wall."; kept as one argument,
+#                which BRAIN_ARGS (split on spaces) cannot do
 #   PUDDLES      route: puddles at fixed places, "X,Y,R[,FLOOR] ..." in the MAP frame:
 #                the brain gets each as --puddle-at (add --floor-guard sim to
 #                BRAIN_ARGS for it to see them), the world as --puddle= (drawn in
@@ -76,6 +79,7 @@ RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 TRACK_LOG=${TRACK_LOG:-0}
 VAMOS_MODE=${VAMOS_MODE:-shadow}
+VAMOS_STEER=${VAMOS_STEER:-}
 CLOUD_LOG=${CLOUD_LOG:-0}
 LIO_RECORD=${LIO_RECORD:-0}
 POSE=${POSE:-lio}
@@ -231,7 +235,7 @@ case "${1:-}" in
     start_gaps
     brain_args=${BRAIN_ARGS:-}
     for p in $PUDDLES; do brain_args+=" --puddle-at $p"; done
-    on_board "BRAIN_ARGS='$brain_args' VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
     grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps

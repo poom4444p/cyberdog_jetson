@@ -118,10 +118,22 @@ def project_route(robot_pose, waypoints, cam, min_d=2.0, max_d=4.0, pick_from=No
     return result
 
 
-def vamos_prompt(result):
-    """Format a TRACK result as a VAMOS text prompt."""
+def vamos_prompt(result, steer=None):
+    """Format a TRACK result as a VAMOS text prompt.
+
+    `steer` is an optional preference in plain language ("keep to the left
+    wall"), appended after the goal the way upstream VAMOS prompts it
+    (vendor/VAMOS/vamos_demo.py): the goal pixel, then how to get there.
+    None or blank leaves the goal-only prompt unchanged.
+    """
     lx, ly = result["loc"]
-    return f"Navigate to x=<loc{lx:04d}>, y=<loc{ly:04d}>."
+    prompt = f"Navigate to x=<loc{lx:04d}>, y=<loc{ly:04d}>."
+    steer = " ".join((steer or "").split())
+    if not steer:
+        return prompt
+    if steer[-1] not in ".!?":
+        steer += "."
+    return f"{prompt} {steer}"
 
 
 if __name__ == "__main__":

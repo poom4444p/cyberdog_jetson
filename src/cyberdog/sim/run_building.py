@@ -1344,7 +1344,7 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
-                 vamos_samples=5, vamos_affordance=False,
+                 vamos_samples=5, vamos_affordance=False, vamos_steer=None,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
                  track_log=None, robot=None, cloud_log=None, puddles=0, puddle_at=(),
                  floor_guard=None, fg_latency=fguard.LATENCY, fg_see=fguard.SEE_D,
@@ -1444,6 +1444,8 @@ class Run:
         # before the dream (vamos_client.deliver). Shares the network and the
         # elevation memory with the shadow when both are on.
         self.vamos_affordance = vamos_affordance
+        # A preference VAMOS is asked for with every goal (--vamos-steer).
+        self.vamos_steer = vamos_steer
         if vamos_affordance and self.aff is None:
             from cyberdog.affordance.runtime import Affordance, ElevationMemory
             self.aff, self.elev = Affordance(), ElevationMemory()
@@ -1781,6 +1783,7 @@ class Run:
             "safety": round(safety, 4),
             "disagree": kind,
             "angle_deg": None if angle is None else round(math.degrees(angle), 1),
+            "steer": self.vamos_steer,
         }) + "\n")
 
     def ask_vamos(self, floor, n, state):
@@ -1807,7 +1810,7 @@ class Run:
                 self.vlm_pool = concurrent.futures.ThreadPoolExecutor(1, "vamos")
             self.vlm_worker = self.vlm_pool.submit(
                 self.policy(floor).request, self.robot.get_image().copy(),
-                vamos_prompt(state), self.robot.camera_pose())
+                vamos_prompt(state, self.vamos_steer), self.robot.camera_pose())
             self.pending = (self.vlm_worker, None, n, self.robot.get_pose()[:2])
             self.vlm["asked"] += 1
             self.vlm_asked_t = self.robot.now()
@@ -1816,7 +1819,7 @@ class Run:
         t0 = time.perf_counter()
         cam_pose = self.robot.camera_pose()
         paths = self.policy(floor).request(self.robot.get_image(),
-                                           vamos_prompt(state), cam_pose)
+                                           vamos_prompt(state, self.vamos_steer), cam_pose)
         wait = (time.perf_counter() - t0 if self.vlm_latency is None
                 else self.vlm_latency)
         self.pending = (n + int(round(wait / self.robot.CONTROL_DT)), paths,
@@ -4273,6 +4276,10 @@ def main():
                     help="with --vamos or --shadow: the affordance network judges each "
                          "VAMOS candidate from the LiDAR elevation patch and rejects what "
                          "it calls not walkable, before the safety gate (spec L5 s4)")
+    ap.add_argument("--vamos-steer", default=None, metavar="TEXT",
+                    help="with --vamos or --shadow: a preference in plain language added "
+                         "after the goal in every VAMOS prompt, e.g. \"Keep to the left "
+                         "wall.\" (spec L4 s3: image + goal pixel + preference)")
     ap.add_argument("--autolabel", default=None, metavar="DIR",
                     help="keep onboard frames labelled with the path the dog then walked, "
                          "for the VAMOS LoRA (sim/autolabel.py); map-only, not with --vamos")
@@ -4320,6 +4327,8 @@ def main():
         args.vamos = not (args.shadow or args.autolabel)
     if args.vamos_affordance and not (args.vamos or args.shadow):
         ap.error("--vamos-affordance judges VAMOS's candidates; it needs --vamos or --shadow")
+    if args.vamos_steer is not None and not (args.vamos or args.shadow):
+        ap.error("--vamos-steer goes into the VAMOS prompt; it needs --vamos or --shadow")
     try:
         handle = HandleScript(args.handle)
     except ValueError as bad:
@@ -4384,6 +4393,7 @@ def main():
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               vamos_samples=args.vamos_samples, vamos_affordance=args.vamos_affordance,
+              vamos_steer=args.vamos_steer,
               handle=handle if args.handle else None,
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
               robot=robot, puddles=args.puddles, puddle_at=args.puddle_at,
