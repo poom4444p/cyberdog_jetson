@@ -150,3 +150,38 @@ def test_sharp_turn_onto_the_axis_is_refused(router):
     says = [[], [], []]
     out, _ = lane.center_doors(pts, says, g, router.doorways(floor), router.lane_walls(floor))
     assert out == pts
+
+
+PINCH_X = (38.4, 39.6)         # wing corridor: vending's east face, cabinet's west face
+PINCH_Y = (30.3, 31.7)         # generate_building.PINCH, the same on every floor
+
+
+@pytest.mark.parametrize("name,floor", [("cafeteria", 1), ("library", 2)])
+def test_through_the_middle_of_the_wing_pinch(router, name, floor):
+    # 11-18: the line ran at x 39.24-39.48, 0.13 m off the cabinet: the 1.2 m
+    # gap is deeper than a door (1.4 m) and was not taken for one, and the
+    # selftest's cafeteria [twin-board] run stopped short there.
+    tgt = router.resolve(name, floor, START, floor=floor)
+    legs = router.plan(1, START, tgt)
+    f, route = legs[-1]
+    assert f == floor
+    pts, _ = router.walk_line(f, route)
+    mid = sum(PINCH_X) / 2
+    inside = [p for p in pts if PINCH_Y[0] - 0.3 <= p[1] <= PINCH_Y[1] + 0.3]
+    assert len(inside) >= 2
+    assert max(abs(p[0] - mid) for p in inside) < 0.05
+    # and straight end to end: no segment crosses the pinch on a slant
+    for a, b in zip(pts, pts[1:]):
+        if min(a[1], b[1]) < PINCH_Y[1] and max(a[1], b[1]) > PINCH_Y[0]:
+            assert abs(a[0] - mid) < 0.05 and abs(b[0] - mid) < 0.05
+
+
+def test_a_thin_wall_door_is_not_deepened(router):
+    from scipy import ndimage
+    floor = 2
+    g = router.plan_grids[floor]
+    labels, _ = ndimage.label(router.doorways(floor))
+    r, c = g.world_to_grid(3.0, 8.0)
+    label = int(labels[r - 10:r + 10, c - 10:c + 10].max())
+    centre, n = lane._door_axis(g, labels, router.lane_walls(floor), label)
+    assert lane._door_depth(g, labels, label, centre, n) <= lane.DOOR_INNER
