@@ -15,6 +15,9 @@ move at all on the live one, and failed Gate D (docs/dreaming_safety_kpis.md,
     conda activate vamos_mac                     # torch lives here, not in cyberdog_sim
     python scripts/vamos/train_lora.py           # -> models/vamos_lora/
     python scripts/vamos/train_lora.py --epochs 1 --limit 200    # a quick look
+    # price a run on a small machine first: s/step, s/frame, peak memory
+    python scripts/vamos/train_lora.py --epochs 1 --limit 200 --val-limit 50 \
+        --batch 1 --accum 16 --out /tmp/trial_lora
 
 Config per the spec: r=16, alpha=16, dropout 0.05 on q,k,v,o,gate,up,down_proj
 -- of the Gemma language model only. SigLIP also has q/k/v_proj, and the
@@ -64,6 +67,44 @@ TARGETS = r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|d
 def device():
     return ("cuda" if torch.cuda.is_available()
             else "mps" if torch.backends.mps.is_available() else "cpu")
+
+
+class Meter:
+    """Seconds per optimiser step and per frame, and peak device memory: what
+    a trial run is for -- to price the full run before starting it. MPS has
+    no peak counter, so the driver's allocation is sampled at every step."""
+
+    def __init__(self, dev):
+        self.dev = dev
+        self.peak = 0
+        self.steps = self.frames = 0
+        self.t0 = time.time()
+
+    def sample(self):
+        if self.dev == "mps":
+            self.peak = max(self.peak, torch.mps.driver_allocated_memory())
+        elif self.dev == "cuda":
+            self.peak = max(self.peak, torch.cuda.max_memory_allocated())
+
+    def start(self):
+        """Counts from here: each epoch alone, without the val pass between."""
+        self.steps = self.frames = 0
+        self.t0 = time.time()
+
+    def step(self):
+        self.sample()
+        self.steps += 1
+
+    def report(self):
+        dt = time.time() - self.t0
+        return (f"{dt / max(self.steps, 1):.1f} s/step, {dt / max(self.frames, 1):.2f} s/frame, "
+                f"peak {self.peak / 2**30:.1f} GB")
+
+    def summary(self):
+        dt = time.time() - self.t0
+        return {"s_per_step": round(dt / max(self.steps, 1), 2),
+                "s_per_frame": round(dt / max(self.frames, 1), 3),
+                "peak_gb": round(self.peak / 2**30, 2), "steps": self.steps}
 
 
 def bulge(s):
@@ -129,6 +170,9 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--val", type=float, default=0.1, help="fraction of runs held out")
     ap.add_argument("--limit", type=int, default=0, help="use only this many train frames")
+    ap.add_argument("--val-limit", type=int, default=0,
+                    help="use only this many val frames (a speed/memory trial: the full "
+                         "val set is ~1,500 frames, scored before the first step)")
     ap.add_argument("--oversample", type=int, default=4,
                     help=f"times each frame bulging over {DETOUR_M} m is seen per epoch")
     ap.add_argument("--prompt", choices=["map", "hindsight"], default="map",
@@ -149,6 +193,10 @@ def main():
     if args.limit:
         random.Random(args.seed).shuffle(train)
         train = train[:args.limit]
+    if args.val_limit:
+        # Whole runs are still the split; this only scores fewer of their frames.
+        random.Random(args.seed).shuffle(val)
+        val = val[:args.val_limit]
     detours = [s for s in train if bulge(s) > DETOUR_M]
     train = train + detours * (args.oversample - 1)
     print(f"{len(runs)} clean runs: {len(train)} train frames ({len(detours)} detours "
@@ -170,28 +218,36 @@ def main():
         opt, lambda s: min(1.0, (s + 1) / max(steps * 0.05, 1))
         * max(0.0, 1 - s / max(steps, 1)))
 
+    meter = Meter(dev)
+    t_val = time.time()
     best = evaluate(model, processor, val, dev, args.batch, key)
-    print(f"epoch 0 (the base model): val loss {best:.4f}")
+    meter.sample()
+    print(f"epoch 0 (the base model): val loss {best:.4f} "
+          f"({time.time() - t_val:.0f}s for {len(val)} frames, peak {meter.peak / 2**30:.1f} GB)")
     history = [{"epoch": 0, "val_loss": best}]
     best_epoch, t0 = 0, time.time()
     rng = random.Random(args.seed)
     for epoch in range(1, args.epochs + 1):
         rng.shuffle(train)
         running, seen = 0.0, 0
+        meter.start()
         for k in range(0, len(train), args.batch):
             chunk = train[k:k + args.batch]
             loss = model(**batch(processor, chunk, dev, key)).loss
             (loss / args.accum).backward()
             running += loss.item() * len(chunk)
             seen += len(chunk)
+            meter.frames += len(chunk)
             if (k // args.batch + 1) % args.accum == 0 or k + args.batch >= len(train):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
                 sched.step()
                 opt.zero_grad()
+                meter.step()
             if (k // args.batch) % 50 == 0:
                 print(f"  epoch {epoch} {seen}/{len(train)} train loss {running / seen:.4f} "
-                      f"({time.time() - t0:.0f}s)", flush=True)
+                      f"({time.time() - t0:.0f}s; {meter.report()})", flush=True)
+        print(f"  epoch {epoch} trained: {meter.report()}")
         v = evaluate(model, processor, val, dev, args.batch, key)
         history.append({"epoch": epoch, "train_loss": running / max(seen, 1), "val_loss": v})
         print(f"epoch {epoch}: train loss {running / max(seen, 1):.4f}, val loss {v:.4f}")
@@ -209,6 +265,7 @@ def main():
         "val_runs": val_runs, "train_frames": len(train), "val_frames": len(val),
         "best_epoch": best_epoch, "history": history,
         "args": vars(args), "device": dev, "wall_s": round(time.time() - t0),
+        "last_epoch_speed": meter.summary(),
     }, indent=2))
     print(f"kept epoch {best_epoch} (val loss {best:.4f}) -> {out}")
 
