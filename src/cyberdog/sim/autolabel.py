@@ -34,6 +34,31 @@ MIN_MOVED = 0.25      # m the dog must have walked since the last kept frame
 N_POINTS = 5          # VAMOS answers with 5 points (10 location tokens)
 MIN_LENGTH = 1.0      # m of walked path that must be visible for a label
 STEP = 0.05           # m between points when walking the track
+DETOUR_M = 0.15       # m off the straight line that makes a frame a detour
+
+
+def seg_dist(p, a, b):
+    """Distance from point `p` to the segment a-b."""
+    ax, ay = a
+    dx, dy = b[0] - ax, b[1] - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L))
+    return math.dist(p, (ax + t * dx, ay + t * dy))
+
+
+def bulge(path):
+    """How far a walked path strays from the straight line to its end, in m.
+    Over DETOUR_M it is a detour: the frames the fine-tune is for."""
+    start = path[0]
+    return max(seg_dist(p, start, path[-1]) for p in path)
+
+
+def heading_off(loc_x, cam):
+    """Degrees between the camera axis and a goal in location bin `loc_x`
+    (taken at the bin's centre), unsigned. The camera is level, so the
+    column alone gives the bearing."""
+    u = (int(loc_x) + 0.5) * cam["width"] / 1024
+    return abs(math.degrees(math.atan((u - cam["cx"]) / cam["fx"])))
 
 
 def prompt(goal_loc):
@@ -157,6 +182,7 @@ class AutoLabel:
                     os.remove(os.path.join(self.dir, s["frame"]))
                     continue
                 pixels, locs, ground = got
+                walked = [tuple(s["cam_pose"][:2])] + list(ground)
                 lines.append({
                     "frame": s["frame"], "floor": floor, "leg": leg, "tick": s["tick"],
                     "prompt": prompt(locs[-1]), "target": target(locs),
@@ -164,6 +190,13 @@ class AutoLabel:
                     "ground": [[round(x, 3), round(y, 3)] for x, y in ground],
                     "pose": s["pose"], "cam_pose": s["cam_pose"],
                     "map_prompt": prompt(s["map_loc"]),
+                    # The map's subgoal this frame steered at, and what the
+                    # frame is about: how far the walk leaves the straight
+                    # line (from the lens) and how far off the camera axis
+                    # the map's goal lies -- scripts/vamos/evaluate.py's parts.
+                    "destination": s["destination"],
+                    "bulge": round(bulge(walked), 3),
+                    "off": round(heading_off(s["map_loc"][0], self.cam), 1),
                 })
         with open(os.path.join(self.dir, "samples.jsonl"), "w") as f:
             for line in lines:

@@ -104,6 +104,10 @@ def test_recorder_writes_labelled_frames_and_drops_the_rest(tmp_path):
     for l in lines:
         assert l["prompt"].startswith("Navigate to x=<loc")
         assert l["target"].count("<loc") == 2 * al.N_POINTS
+        # What the frame is about, for collect.py's counts and the oversampling.
+        assert l["destination"] == pytest.approx([l["pose"][0] + 3.0, 0.0], abs=1e-3)
+        assert l["bulge"] < 0.01                 # straight down the corridor
+        assert l["off"] == pytest.approx(al.heading_off(512, CAM), abs=0.05)
 
 
 def test_standing_still_keeps_one_frame_not_many(tmp_path):
@@ -118,3 +122,34 @@ def test_standing_still_keeps_one_frame_not_many(tmp_path):
     for n in range(200):
         rec.tick(n, (0.0, 0.0, 0.0), (0.1, 0.0, 0.0), state, image)
     assert len(calls) == 1
+
+
+def test_bulge_is_the_widest_step_off_the_straight_line():
+    assert al.bulge([(0, 0), (1, 0), (2, 0)]) == 0.0
+    assert al.bulge([(0, 0), (1, 0.4), (2, 0)]) == pytest.approx(0.4)
+    assert al.bulge([(0, 0), (1, 0.4), (2, 0)]) > al.DETOUR_M
+
+
+def test_heading_off_is_zero_on_the_axis_and_grows_to_the_side():
+    centre = int(CAM["cx"] / CAM["width"] * 1024)
+    assert al.heading_off(centre, CAM) < 0.2
+    left, right = al.heading_off(0, CAM), al.heading_off(1023, CAM)
+    assert left > 15 and right > 15
+    assert al.heading_off(centre + 100, CAM) < right
+
+
+def test_collect_holds_out_the_gate_d_routes_and_the_hil_steer_set():
+    import sys
+    from cyberdog import paths
+    sys.path.insert(0, str(paths.ROOT / "scripts"))
+    sys.path.insert(0, str(paths.ROOT / "scripts" / "vamos"))
+    import collect
+    from gate_d import ROUTES
+    train = collect.destinations()
+    for name in ROUTES + ["room 201", "mechanical engineering lab", "server room"]:
+        assert name in collect.HOLDOUT and name not in train
+    assert len(collect.HOLDOUT) == len(set(collect.HOLDOUT))
+    assert "computer engineering lab" in train
+    got = collect.parts([{"bulge": 0.3, "off": 2.0}, {"bulge": 0.0, "off": 20.0},
+                         {"bulge": 0.0, "off": 7.0}])
+    assert got == {"all": 3, "detour": 1, "off 0-5": 1, "off 5-15": 1, "off >15": 1}

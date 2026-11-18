@@ -94,10 +94,15 @@ from cyberdog.sim.scene.levels import floor_z
 # Bodies emitted per floor. Fixed at scene-build time, because mocap bodies
 # live in the XML: `--pedestrians N` picks how many of these are walking, and
 # the rest are parked underground. Raising it means rebuilding the scene.
-POOL = 4
+# 8 since 2026-11-18 (was 4): the VAMOS LoRA set wants crowded corridors too
+# (scripts/vamos/collect.py, up to 8 a floor). Walkers are drawn one after the
+# other from the seed, so a crowd of 4 or fewer is the same people as before.
+POOL = 8
 
 COLOURS = ["0.25 0.45 0.75 1", "0.70 0.30 0.35 1",
-           "0.35 0.60 0.40 1", "0.55 0.40 0.68 1"]
+           "0.35 0.60 0.40 1", "0.55 0.40 0.68 1",
+           "0.80 0.60 0.25 1", "0.30 0.65 0.70 1",
+           "0.60 0.55 0.45 1", "0.75 0.45 0.60 1"]
 PARK_Z = -50.0          # where an unused body waits: far below any floor,
                         # out of the LiDAR's 12 m and under the ground plane
 
