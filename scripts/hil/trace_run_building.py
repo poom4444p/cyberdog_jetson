@@ -128,10 +128,17 @@ def take_answer(self, floor, n, pose, destination):
     out = orig_take(self, floor, n, pose, destination)
     if out is not None:
         chosen, paths, safety = out
-        x, y, _ = pose
+        x, y, yaw = pose
         end = "-" if not chosen else "(%.2f,%.2f)" % tuple(chosen[-1])
+        # Heading and destination too. HIL 11-18: nothing passed in ~16% of the
+        # answers asked within 5 deg of the destination, ~40% beyond 15 deg,
+        # and the subgoal was in line of sight in 402 of 404 -- so `off` is
+        # what to read, not corners. (Holding the ask back until the dog faces
+        # the way was tried and dropped: mech lab failed 2/2 at the wing corner.)
+        bear = math.degrees(abs(rb.wrap(math.atan2(destination[1] - y, destination[0] - x) - yaw)))
         print(f"  VAMOS t={self.robot.now():6.1f} pose ({x:.2f},{y:.2f}) safety {safety:.2f} "
-              f"candidates {len(paths)} chosen end {end}", flush=True)
+              f"candidates {len(paths)} chosen end {end} yaw {yaw:+.2f} "
+              f"dest ({destination[0]:.2f},{destination[1]:.2f}) off {bear:.0f}deg", flush=True)
     return out
 
 
