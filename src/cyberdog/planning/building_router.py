@@ -39,8 +39,8 @@ import yaml
 from cyberdog.mapping.occupancy_grid import OccupancyGrid  # noqa: E402
 from cyberdog.mapping.behavior_layer import BehaviorLayer  # noqa: E402
 from cyberdog.mapping.astar_planner import AStarPlanner  # noqa: E402
-from cyberdog.mapping.lane import (bridge_doors, door_gates, doorway_cells,  # noqa: E402
-                                   keep_side, round_corners)
+from cyberdog.mapping.lane import (bridge_doors, center_doors, door_gates, doorway_cells,  # noqa: E402
+                                   keep_side, round_corners, widen_corners)
 
 from cyberdog.paths import BUILDING_DIR, MAP_CONFIG as CONFIG_PATH
 
@@ -424,8 +424,12 @@ class BuildingRouter:
         for c in route.checkpoints:
             says[c.index] = list(c.announcements)
         points = [(float(x), float(y)) for x, y in route.polyline]
+        points, says = center_doors(points, says, self.plan_grids[floor],
+                                    self.doorways(floor), self.lane_walls(floor))
         if self.turn_radius <= 0:
             return points, says
+        points, says = widen_corners(points, says, self.plan_grids[floor],
+                                     self.doorways(floor), self.turn_radius)
         return round_corners(points, says, self.plan_grids[floor], self.turn_radius)
 
     def plan(self, start_floor, start_xy, target, lift_stop=None, transit=None):
