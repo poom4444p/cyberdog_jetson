@@ -161,3 +161,14 @@ def test_floor2_south_lane_clears_the_crate():
         if w.done:
             break
         assert not _overlaps(w, boxes), (w.x, w.y)
+
+
+def test_a_crowd_of_eight_walks_and_four_are_the_same_people_as_before():
+    from cyberdog.sim.scene import pedestrians
+    assert pedestrians.POOL >= 8
+    big, small = Crowd(1, 8, seed=3, aware=True), Crowd(1, 4, seed=3, aware=True)
+    assert len(big.walkers) == 8
+    assert big.positions()[:4] == small.positions()
+    names = [n for n, _ in big.poses()]
+    assert len(names) == len(set(names)) == pedestrians.POOL
+    assert len(pedestrians.bodies(1)) == pedestrians.POOL

@@ -32,8 +32,11 @@ model path with "lora" in it as an adapter on the base named inside it:
 
 Detours are rare: in the first collection 2.1% of frames leave the straight
 line by more than 0.3 m, and those are the frames the fine-tune is for. Frames
-that bulge more than DETOUR_M are repeated --oversample times in each epoch
-(validation is left as collected, so its loss stays an honest average).
+that bulge more than DETOUR_M are repeated --oversample times in each epoch,
+and frames whose map goal lies more than OFF_DEG off the camera axis (the
+sample's `off`, written by collect.py since 2026-11) --oversample-off times;
+a frame that is both is repeated by the larger of the two. Validation is
+left as collected, so its loss stays an honest average.
 
 Training holds out 10% of the train *runs* (not frames: neighbouring frames
 of one walk are nearly the same picture) for a validation loss, and keeps the
@@ -57,10 +60,11 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA = ROOT / "datasets" / "vamos" / "train"
+DATA = ROOT / "datasets" / "vamos_L" / "train"   # the old building's set: datasets/vamos/train
 OUT = ROOT / "models" / "vamos_lora"
 BASE = "mateoguaman/vamos"
 DETOUR_M = 0.15      # m off the straight line that makes a frame worth repeating
+OFF_DEG = 15         # deg off the camera axis that makes a frame worth repeating
 TARGETS = r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
 
 
@@ -120,6 +124,17 @@ def bulge(s):
     return max(off(px, py) for px, py in s["ground"])
 
 
+def repeats(s, oversample, oversample_off):
+    """Times a train frame is seen per epoch: detours and frames with the goal
+    far off the camera axis are what the fine-tune is for."""
+    n = 1
+    if bulge(s) > DETOUR_M:
+        n = max(n, oversample)
+    if s.get("off", 0) > OFF_DEG:
+        n = max(n, oversample_off)
+    return n
+
+
 def load_samples(data_dir):
     """Every labelled frame of every clean run, grouped by run."""
     index = json.loads((data_dir / "index.json").read_text())
@@ -175,6 +190,9 @@ def main():
                          "val set is ~1,500 frames, scored before the first step)")
     ap.add_argument("--oversample", type=int, default=4,
                     help=f"times each frame bulging over {DETOUR_M} m is seen per epoch")
+    ap.add_argument("--oversample-off", type=int, default=2,
+                    help=f"times each frame with the goal over {OFF_DEG} deg off the camera "
+                         "axis is seen per epoch (needs `off` in the samples)")
     ap.add_argument("--prompt", choices=["map", "hindsight"], default="map",
                     help="goal in the prompt: the projector's, as asked live (default), "
                          "or the walked path's end")
@@ -197,10 +215,12 @@ def main():
         # Whole runs are still the split; this only scores fewer of their frames.
         random.Random(args.seed).shuffle(val)
         val = val[:args.val_limit]
-    detours = [s for s in train if bulge(s) > DETOUR_M]
-    train = train + detours * (args.oversample - 1)
-    print(f"{len(runs)} clean runs: {len(train)} train frames ({len(detours)} detours "
-          f"x{args.oversample}), {len(val)} val frames ({len(val_runs)} runs held out), "
+    detours = sum(bulge(s) > DETOUR_M for s in train)
+    offs = sum(s.get("off", 0) > OFF_DEG for s in train)
+    train = [s for s in train for _ in range(repeats(s, args.oversample, args.oversample_off))]
+    print(f"{len(runs)} clean runs: {len(train)} train frames ({detours} detours "
+          f"x{args.oversample}, {offs} off >{OFF_DEG} deg x{args.oversample_off}), "
+          f"{len(val)} val frames ({len(val_runs)} runs held out), "
           f"{args.prompt} prompt, device {dev}")
 
     processor = AutoProcessor.from_pretrained(BASE)

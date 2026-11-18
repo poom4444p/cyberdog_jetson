@@ -1,4 +1,4 @@
-"""Score VAMOS, base or fine-tuned, on the held-out Gate D routes (offline).
+"""Score VAMOS, base or fine-tuned, on the held-out routes (offline).
 
 Sends each held-out frame to the VAMOS server exactly as the live client does
 (5-beam search, temperature 0) and compares the five answers with the path
@@ -51,33 +51,23 @@ import requests
 
 from cyberdog import paths
 from cyberdog.planning.checkpoint_projector import load_camera_config
+from cyberdog.sim.autolabel import DETOUR_M, bulge, seg_dist
+from cyberdog.sim.autolabel import heading_off as heading_off_loc
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.perception import LiveClearance
 from cyberdog.sim.vamos_client import DEFAULT_URL, VamosPolicy, ahead, pixel_to_ground
 
-DATA = paths.DATASETS_DIR / "vamos" / "test"
+# The L building (collect.py, 2026-11). The 10-08 set of the old building is
+# datasets/vamos/test: --data it to score that.
+DATA = paths.DATASETS_DIR / "vamos_L" / "test"
 OUT = paths.OUTPUT_DIR / "vamos_eval"
-DETOUR = 0.15        # m off the straight line that makes a frame a detour (= train_lora.DETOUR_M)
+DETOUR = DETOUR_M    # m off the straight line that makes a frame a detour (= train_lora.DETOUR_M)
 OFF_BUCKETS = ((0, 5), (5, 15), (15, 90))   # heading off, degrees
 LOC_X = re.compile(r"x=<loc(\d{4})>")
 
 
-def seg_dist(p, a, b):
-    ax, ay = a
-    dx, dy = b[0] - ax, b[1] - ay
-    L = dx * dx + dy * dy
-    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L))
-    return math.dist(p, (ax + t * dx, ay + t * dy))
-
-
 def line_dist(p, line):
     return min(seg_dist(p, a, b) for a, b in zip(line, line[1:]))
-
-
-def bulge(path):
-    """How far the walked path strays from the straight line to its end."""
-    start = path[0]
-    return max(seg_dist(p, start, path[-1]) for p in path)
 
 
 def heading_off(prompt, cam):
@@ -87,8 +77,7 @@ def heading_off(prompt, cam):
     m = LOC_X.search(prompt)
     if not m:
         return None
-    u = (int(m.group(1)) + 0.5) * cam["width"] / 1024
-    return abs(math.degrees(math.atan((u - cam["cx"]) / cam["fx"])))
+    return heading_off_loc(int(m.group(1)), cam)
 
 
 def bucket(off):
