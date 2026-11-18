@@ -72,7 +72,11 @@ def door_gates(points, grid, doors):
     return gates
 
 
-DOOR_MAX = 1.0      # metres: a doorway's cells span no more than this either way
+DOOR_MAX = 2.5      # metres: a doorway's cells span no more than this at least one way.
+                    # 1.0 refused the wing PINCH (vending | cabinet, 1.2 m wide, 1.4 m
+                    # deep: cells 1.15 x 1.95 m with the grid's inflation), so the line
+                    # ran 0.13 m off the cabinet and selftest cafeteria [twin-board]
+                    # stopped short (11-18). Only the pinch changes, on every floor
 DOOR_APPROACH = (0.9, 0.75, 0.6)  # metres before the doorway's centre the line turns onto its
                                   # axis, tried in turn: about the lane (0.75 m off the wall face).
                                   # 1.4 took the line to mid-corridor first, into the crate east
@@ -85,6 +89,14 @@ DOOR_MAX_TURN = math.radians(75)  # sharpest turn onto the axis at the approach 
                                   # the handler behind swung into the wall / floor-2 crate
                                   # (selftest biology lab, electrical engineering lab, 11-18)
 DOOR_ROOM = 0.6     # metres back along the line the turn onto the axis is measured from
+
+
+def _door_depth(grid, labels, label, centre, n):
+    """Metres from the doorway's centre to its farthest cell along its axis
+    `n`: half its depth. A door in a thin wall is ~0.35, the wing pinch ~1.0."""
+    rc = np.argwhere(labels == label)
+    xy = np.array([grid.grid_to_world(int(r), int(c)) for r, c in rc])
+    return float(np.abs((xy - centre) @ n).max())
 
 
 def _door_axis(grid, labels, walls, label):
@@ -126,7 +138,9 @@ def center_doors(points, says, grid, doors, walls):
     dog up on the axis the walk line gives through a door, so it followed the
     slant. Now each doorway the line crosses is replaced by: a point
     DOOR_APPROACH before it on its axis, DOOR_INNER either side of its centre,
-    and DOOR_BEYOND past it -- straight and square through the middle, and
+    and DOOR_BEYOND past it (each longer by how much more than DOOR_INNER
+    the opening's half depth is: a passage between two pieces of furniture
+    is straight end to end) -- straight and square through the middle, and
     round_corners' arcs end before the doorway (each takes at most half a
     segment). The first lengths that are free in `grid` and turn onto the
     axis by no more than DOOR_MAX_TURN are used; where none are, or the
@@ -156,9 +170,13 @@ def center_doors(points, says, grid, doors, walls):
         centre, n = axis
         if np.dot(n, b - a) < 0:
             n = -n
+        # a deep opening (the wing pinch) is straight all through: every
+        # length grows by how much more than DOOR_INNER its half depth is
+        extra = max(0.0, _door_depth(grid, labels, hit, centre, n) - DOOR_INNER)
+        inner = DOOR_INNER + extra
         done = False
-        for app in DOOR_APPROACH:
-            for bey in DOOR_BEYOND:
+        for app in (d + extra for d in DOOR_APPROACH):
+            for bey in (d + extra for d in DOOR_BEYOND):
                 i0, i1 = i, i + 1
                 while i0 > 0 and math.dist(pts[i0], centre) < app + 0.1:
                     i0 -= 1
@@ -176,8 +194,8 @@ def center_doors(points, says, grid, doors, walls):
                 if np.linalg.norm(come) > 1e-6 and (
                         np.dot(come, n) / np.linalg.norm(come) < math.cos(DOOR_MAX_TURN)):
                     continue                      # a corner too sharp to round before the door
-                new = [tuple(centre - n * app), tuple(centre - n * DOOR_INNER),
-                       tuple(centre + n * DOOR_INNER), tuple(centre + n * bey)]
+                new = [tuple(centre - n * app), tuple(centre - n * inner),
+                       tuple(centre + n * inner), tuple(centre + n * bey)]
                 line = [pts[i0]] + new + [pts[i1]]
                 if all(_free_line(grid, p, q) for p, q in zip(line, line[1:])):
                     moved = [w for s in says[i0 + 1:i1] for w in s]

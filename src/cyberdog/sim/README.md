@@ -666,6 +666,17 @@ and then. Neither belongs on the dog.
   reconsiders when that side has nothing reachable left, which is what those two
   routes were waiting for. A genuine curve -- round an obstacle and immediately
   through a door -- would be CE-RRT\*'s, which today plans round people only.
+- **Out of the wing pinch into the wing trolley, the person on the handle
+  brushes the cabinet** (`cafeteria`, `--robot twin-board`, ~2 s, selftest
+  `run-board` scores it as a known limit). The trolley (`obstacles.WING_OBSTACLES`,
+  y 33.3) stands 1.6 m past the 1.2 m wide, 1.4 m deep pinch (vending | cabinet,
+  y 30.3-31.7). The handle is rigid and 1.1 m long, so until the dog is at
+  y 33.15 its user is still in the pinch, and the dog can turn ~13 deg before
+  they come within `HANDLER_ROOM` of a side; passing the trolley either way
+  needs ~20 deg. The plain twin squeezes by; the board's guard stops the dog
+  0.45 m short and it pivots (`respect_board`). Not pivoting there was tried:
+  the dog stood 30 s and gave up (11-18). The way out is a plan that starts
+  the curve inside the pinch, or a scene without the squeeze.
 
 Three entries that used to be on this list are gone, and all three were the same
 kind of mistake -- a test that asked a question other than the one that
