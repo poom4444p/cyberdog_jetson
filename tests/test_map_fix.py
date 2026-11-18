@@ -102,11 +102,56 @@ def test_no_field_no_correction():
     assert mf.pose(1.0, 2.0, 0.3) == (1.0, 2.0, 0.3)
 
 
-def test_a_floor_of_its_own():
+def test_a_new_floor_starts_from_the_correction_it_left_with():
+    # One odometry frame for the building: the error stepping into the lift
+    # is the error stepping out. The new floor then refines on its own.
     f1, f2, mf, dog = corridor(), corridor(), MapFix(), (8.0, 2.5)
     mf.use(f1)
     for _ in range(3):
         mf.refine(mf.points(off(wall_scan(dog), dog, 0.0, 0.15, 0.0)), dog)
     assert mf.pose(8.0, 2.5, 0.0)[1] == pytest.approx(2.35, abs=0.03)
-    mf.use(f2)
+    mf.use(None)                                   # in the lift
     assert mf.pose(8.0, 2.5, 0.0) == (8.0, 2.5, 0.0)
+    mf.use(f2)
+    assert mf.pose(8.0, 2.5, 0.0)[1] == pytest.approx(2.35, abs=0.03)
+    for _ in range(3):                             # floor 2 sees its own drift
+        mf.refine(mf.points(off(wall_scan(dog), dog, 0.0, 0.25, 0.0)), dog)
+    assert mf.pose(8.0, 2.5, 0.0)[1] == pytest.approx(2.25, abs=0.03)
+    assert mf.corr[id(f1)][1] == pytest.approx(-0.15, abs=0.03)   # floor 1's kept
+
+
+def test_the_same_floor_every_tick_keeps_its_own_correction():
+    f, mf, dog = corridor(), MapFix(), (8.0, 2.5)
+    mf.use(f)
+    for _ in range(3):
+        mf.refine(mf.points(off(wall_scan(dog), dog, 0.0, 0.15, 0.0)), dog)
+        mf.use(f)                                  # run_building calls use() every tick
+    assert mf.pose(8.0, 2.5, 0.0)[1] == pytest.approx(2.35, abs=0.03)
+
+
+def test_a_corridor_end_puts_back_drift_past_the_old_bound():
+    # HIL 11-17, room 201: x drift down the corridor, seen all at once at its
+    # end wall, needed 0.6+ m. The old 0.60 m bound reset C every few scans
+    # (587 resets) and the walls jumped back and forth. Now it is taken.
+    f, mf, dog = corridor(), MapFix(), (3.5, 2.5)          # 1.5 m from the west end
+    truth = wall_scan(dog)
+    seen = off(truth, dog, 0.9, 0.05, math.radians(1.0))
+    mf.use(f)
+    out = seen
+    for _ in range(8):
+        out = mf.refine(mf.points(seen), dog)
+    err = np.hypot(out[:, 0] - truth[:, 0], out[:, 1] - truth[:, 1])
+    assert np.median(err) < 0.03
+    assert mf.resets == 0
+    assert mf.pose(*dog, 0.0)[0] == pytest.approx(dog[0] - 0.9, abs=0.05)
+
+
+def test_past_the_bound_it_still_lets_go():
+    # 1.8 m of drift: C has followed it to -1.4 and the next scan would take
+    # it past MAX_M. Lost, not trusted: back to the board's own pose.
+    f, mf, dog = corridor(), MapFix(), (3.5, 2.5)
+    seen = off(wall_scan(dog), dog, 1.8, 0.0, 0.0)
+    mf.use(f)
+    mf.corr[id(f)] = mf.carry = (-1.4, 0.0, 0.0)
+    mf.refine(mf.points(seen), dog)
+    assert mf.resets == 1 and mf.carry is None and id(f) not in mf.corr

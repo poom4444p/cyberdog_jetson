@@ -20,6 +20,22 @@ correction median 0.08 m / 0.34 deg.
 
 Only where the pose is the board's (BoardTwinRobot). The twin's pose is the
 physics' own, nothing to correct.
+
+Along a corridor the walls fix y and yaw but not x: only an end wall or the
+jambs of a door say where along it the dog is, so the board's x drift builds
+up unseen down the 47 m corridor and is corrected all at once at the far
+end. HIL 11-17, routes to the west-end rooms: 0.45-0.60 m at the dog. With
+the bound at 0.60 m (MAX_M) a needed 0.6+ reset C to nothing every few scans
+(587 resets on the way to room 201): the walls there jumped 0.6 m back and
+forth, the tracker read them as people crossing ("Someone crossing from the
+right. Waiting." 29 times, on a floor with nobody on it) and the dog timed
+out at the door. MAX_M is now 1.5 m, still under half the 6 m between doors,
+so a fit cannot lock onto the next door along.
+
+And a floor change keeps the correction: the board's odometry is one frame
+for the whole building and the floors share the map's x, y, so the error
+the dog had stepping into the lift is the one it has stepping out. It used
+to start every floor from none and relearn it from the lift lobby.
 """
 import math
 
@@ -31,7 +47,7 @@ MIN_POINTS = 200      # wall returns needed to trust a refinement at all
 MAX_POINTS = 4000     # subsampled to this, for the J4012
 ITERS = 4             # Gauss-Newton steps a scan
 STEP_M, STEP_RAD = 0.10, math.radians(3.0)   # the most one step moves
-MAX_M, MAX_RAD = 0.60, math.radians(12.0)    # the most C may ever be: past it, reset
+MAX_M, MAX_RAD = 1.5, math.radians(12.0)     # the most C may ever be: past it, reset
 HUBER = 0.10          # m off a face past which a return counts for less (Huber)
 
 
@@ -41,13 +57,18 @@ class MapFix:
     def __init__(self):
         self.field = None     # the LiveClearance of the floor the dog is on
         self.corr = {}        # id(field) -> (tx, ty, th)
+        self.carry = None     # the last C accepted, on any floor: a new floor starts from it
         self._grad = {}
         self.n = self.used = self.resets = 0
         self.size = []        # |t|, |th| after each refinement, for the summary
 
     def use(self, field):
-        """The floor's LiveClearance (faces, res, ox, oy, H). Call before each
-        scan; a new floor starts with no correction."""
+        """The floor's LiveClearance (faces, res, ox, oy, H), or None (in the
+        lift). Call before each scan. Arriving on a floor -- a new one, or
+        back from the lift -- starts from the last correction accepted
+        anywhere (`carry`): one odometry frame, one x, y for every floor."""
+        if field is not self.field and field is not None and self.carry is not None:
+            self.corr[id(field)] = self.carry
         self.field = field
 
     def _c(self):
@@ -143,10 +164,11 @@ class MapFix:
                   math.sin(nth) * cx + math.cos(nth) * cy + nty - cy)
         if math.hypot(*at_dog) > MAX_M or abs(nth) > MAX_RAD:
             self.corr.pop(id(self.field), None)     # lost: start again from the board's
+            self.carry = None
             self.resets += 1
             return p
         self.used += 1
-        self.corr[id(self.field)] = (ntx, nty, nth)
+        self.corr[id(self.field)] = self.carry = (ntx, nty, nth)
         self.size.append((math.hypot(*at_dog), abs(nth)))
         out = np.array(p, dtype=float, copy=True)
         out[:, 0] = cx + c * (x - cx) - s * (y - cy) + dx
