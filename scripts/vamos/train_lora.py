@@ -38,6 +38,11 @@ sample's `off`, written by collect.py since 2026-11) --oversample-off times;
 a frame that is both is repeated by the larger of the two. Validation is
 left as collected, so its loss stays an honest average.
 
+--stride N keeps every Nth of the other, plain frames of each train run:
+frames are 0.25 m apart, so neighbours are near-copies, and on a small
+machine half of them buys half the hours (Mac M5, vamos_L: ~24 h -> ~12 h
+for 3 epochs). The detour and off-axis frames are all kept.
+
 Training holds out 10% of the train *runs* (not frames: neighbouring frames
 of one walk are nearly the same picture) for a validation loss, and keeps the
 epoch that scored best on it. The Gate D routes are a separate split, never
@@ -135,6 +140,17 @@ def repeats(s, oversample, oversample_off):
     return n
 
 
+def thin(samples, stride):
+    """Every `stride`th frame of each run, in the order the run walked them."""
+    seen, out = {}, []
+    for s in samples:
+        run = s["image"].rsplit("/", 2)[0]      # <data>/<run>/frames/<n>.png
+        seen[run] = seen.get(run, -1) + 1
+        if seen[run] % stride == 0:
+            out.append(s)
+    return out
+
+
 def load_samples(data_dir):
     """Every labelled frame of every clean run, grouped by run."""
     index = json.loads((data_dir / "index.json").read_text())
@@ -193,6 +209,9 @@ def main():
     ap.add_argument("--oversample-off", type=int, default=2,
                     help=f"times each frame with the goal over {OFF_DEG} deg off the camera "
                          "axis is seen per epoch (needs `off` in the samples)")
+    ap.add_argument("--stride", type=int, default=1,
+                    help="keep every Nth plain train frame of each run (detour and "
+                         "off-axis frames are all kept); validation is not thinned")
     ap.add_argument("--prompt", choices=["map", "hindsight"], default="map",
                     help="goal in the prompt: the projector's, as asked live (default), "
                          "or the walked path's end")
@@ -208,6 +227,11 @@ def main():
     dev = device()
     runs = load_samples(Path(args.data))
     train, val, val_runs = split(runs, args.val, args.seed)
+    if args.stride > 1:
+        plain = [s for s in train if repeats(s, args.oversample, args.oversample_off) == 1]
+        keep = {id(s) for s in thin(plain, args.stride)}
+        train = [s for s in train
+                 if repeats(s, args.oversample, args.oversample_off) > 1 or id(s) in keep]
     if args.limit:
         random.Random(args.seed).shuffle(train)
         train = train[:args.limit]
@@ -220,7 +244,7 @@ def main():
     train = [s for s in train for _ in range(repeats(s, args.oversample, args.oversample_off))]
     print(f"{len(runs)} clean runs: {len(train)} train frames ({detours} detours "
           f"x{args.oversample}, {offs} off >{OFF_DEG} deg x{args.oversample_off}), "
-          f"{len(val)} val frames ({len(val_runs)} runs held out), "
+          f"{len(val)} val frames ({len(val_runs)} runs held out), stride {args.stride}, "
           f"{args.prompt} prompt, device {dev}")
 
     processor = AutoProcessor.from_pretrained(BASE)
