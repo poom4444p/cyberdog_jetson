@@ -52,6 +52,8 @@
 #                RECORD's video only), shifted by WORLD_ORIGIN
 #   TRACK_LOG=1  route: the brain logs every track every tick; copied to $OUT/tracks.jsonl
 #   CLOUD_LOG=1  route: the brain saves its scans (5 a second); copied to $OUT/clouds.npz
+#   FRAME_LOG=1  route: the brain saves every frame sent to VAMOS and its answer;
+#                copied to $OUT/frames/ (draw them: scripts/vamos/frames.py $OUT/frames)
 #   POSE         route: where the board's pose comes from              (lio)
 #                lio: the Mid-360's odometry (small_gicp + gyro, needs small_gicp in
 #                ~/go2env), as the real dog has it; its error vs the world is in the
@@ -88,6 +90,7 @@ TRACK_LOG=${TRACK_LOG:-0}
 VAMOS_MODE=${VAMOS_MODE:-shadow}
 VAMOS_STEER=${VAMOS_STEER:-}
 CLOUD_LOG=${CLOUD_LOG:-0}
+FRAME_LOG=${FRAME_LOG:-0}
 LIO_RECORD=${LIO_RECORD:-0}
 POSE=${POSE:-lio}
 LIO_DIR=lio_record                 # on the board, under ~
@@ -243,7 +246,7 @@ case "${1:-}" in
     start_gaps
     brain_args=${BRAIN_ARGS:-}
     for p in $PUDDLES; do brain_args+=" --puddle-at $p"; done
-    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE CAMERA=$CAMERA TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE CAMERA=$CAMERA TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG FRAME_LOG=$FRAME_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
     grep -E "VAMOS_MODE|^camera:|\[camera\]|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
@@ -263,6 +266,11 @@ case "${1:-}" in
     if [ "$CLOUD_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/clouds.npz" "$OUT/clouds.npz" \
             && echo "clouds: $OUT/clouds.npz" || echo "clouds: not copied"
+    fi
+    if [ "$FRAME_LOG" = 1 ]; then
+        rsync -a -e "ssh -o BatchMode=yes" "$BOARD:$REMOTE/output/frames/" "$OUT/frames/" \
+            && echo "frames: $OUT/frames ($(ls "$OUT/frames" | grep -c '\.jpg$') frames)" \
+            || echo "frames: not copied"
     fi
     if [ "$VAMOS_MODE" = shadow ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/shadow_log.jsonl" "$OUT/shadow_log.jsonl" \

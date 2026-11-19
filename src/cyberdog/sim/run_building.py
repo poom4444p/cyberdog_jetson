@@ -1351,7 +1351,7 @@ class Run:
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
                  vamos_samples=5, vamos_affordance=False, vamos_steer=None,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
-                 track_log=None, robot=None, cloud_log=None, puddles=0, puddle_at=(),
+                 track_log=None, robot=None, cloud_log=None, frame_log=None, puddles=0, puddle_at=(),
                  floor_guard=None, fg_latency=fguard.LATENCY, fg_see=fguard.SEE_D,
                  fg_miss=0.0):
         self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
@@ -1514,6 +1514,12 @@ class Run:
         # --cloud-log: every CLOUD_EVERY-th scan as the brain got it (map
         # frame), with the pose it was placed by; saved as one .npz on close.
         self.cloud_log, self.clouds = cloud_log, []
+        # --frame-log: every frame sent to VAMOS and its answer (FrameLog).
+        if frame_log:
+            from cyberdog.sim.vamos_client import FrameLog
+            self.frame_log = FrameLog(frame_log)
+        else:
+            self.frame_log = None
         self.no_plan = None                    # ...this tick's reason, for yield_to
         self.place_crowd()
         # Puddles (--puddles N a leg): flat, so the LiDAR does not see them;
@@ -1739,7 +1745,8 @@ class Run:
                                             live, x, y, yaw)), url=url,
                             sample=self.vamos_sample, num_samples=self.vamos_samples,
                             affordance=(lambda ps, pose: self.judge_candidates(live, ps, pose))
-                            if self.vamos_affordance else None)
+                            if self.vamos_affordance else None,
+                            frame_log=self.frame_log, floor=floor)
             if not p.available():
                 raise SystemExit(f"FAILED BY vamos: server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first, "
@@ -4265,6 +4272,9 @@ def main():
     ap.add_argument("--cloud-log", default=None, metavar="PATH",
                     help="save every %d-th scan (map frame) and the dog's pose to "
                          "an .npz when the run ends" % CLOUD_EVERY)
+    ap.add_argument("--frame-log", default=None, metavar="DIR",
+                    help="save every frame sent to VAMOS, with its candidate paths "
+                         "and their verdicts, to DIR (scripts/vamos/frames.py draws them)")
     ap.add_argument("--track-log", default=None, metavar="PATH",
                     help="write the tracker's moving tracks and every walker's true "
                          "position, each tick, as JSON lines "
@@ -4400,6 +4410,7 @@ def main():
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
               crowd=args.pedestrians, seed=args.seed, aware=args.crowd == "aware",
               planner=args.planner, track_log=args.track_log, cloud_log=args.cloud_log,
+              frame_log=args.frame_log,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               vamos_samples=args.vamos_samples, vamos_affordance=args.vamos_affordance,
