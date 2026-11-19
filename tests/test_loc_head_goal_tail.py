@@ -157,3 +157,29 @@ def test_full_head_falls_back():
 
 def test_tail_starts_after_four_points():
     assert loc_head.GOAL_TAIL_AT == 8
+
+
+class Peft:
+    """A PeftModel's shape: get_base_model() is the LM; `.model` (attribute
+    forwarding) is the whole LM too, whose forward has no last_hidden_state."""
+
+    def __init__(self, lm):
+        self._lm = lm
+        self.model = types.SimpleNamespace()               # the LM: logits only
+        self.generation_config = lm.generation_config
+
+    def get_base_model(self):
+        return self._lm
+
+    def get_output_embeddings(self):
+        return self._lm.get_output_embeddings()
+
+
+def test_lora_model_is_unwrapped_to_the_body():
+    full, _, _ = decode(five_points(), goal=GOAL)
+    lm = Model(five_points())
+    dec = LocHeadDecoder(Peft(lm), Tokenizer(), num_beams=5)
+    with torch.no_grad():
+        seq = dec.generate(dict(INPUT), max_new_tokens=20, num_return_sequences=5, goal=GOAL)
+    assert dec.last_tail == "used"
+    assert torch.equal(full, seq)
