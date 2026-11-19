@@ -104,18 +104,18 @@ def test_latency_is_measured_on_robot_time():
 def test_speed_cap_follows_the_vamos_cycle():
     run, _ = stub()
     # Before any answer: the expected latency, here VLM_LATENCY (2.8 s).
-    assert abs(run.vlm_speed_cap() - 1.6 / 5.6) < 1e-9
+    assert abs(run.vlm_speed_cap() - 2.9 / 5.6) < 1e-9
     run.vlm_lat = [2.6]                         # J4012 with the shared prefill
-    assert abs(run.vlm_speed_cap() - 1.6 / 5.2) < 1e-9      # ~0.31 m/s
+    assert abs(run.vlm_speed_cap() - 2.9 / 5.2) < 1e-9      # ~0.56 m/s
     run.vlm_lat = [2.6, 4.6]                    # one slow answer: the slowest counts
-    assert abs(run.vlm_speed_cap() - 1.6 / 9.2) < 1e-9
+    assert abs(run.vlm_speed_cap() - 2.9 / 9.2) < 1e-9
     assert run.vlm["cap_min"] == run.vlm_speed_cap()
     run.vlm_latency = 1.8                       # --vlm-latency is the default only
     run.vlm_lat = []
-    assert abs(run.vlm_speed_cap() - 1.6 / 3.6) < 1e-9
+    assert abs(run.vlm_speed_cap() - 2.9 / 3.6) < 1e-9
 
 
 def test_vamos_is_asked_back_to_back():
     # No tick schedule left: the only gate is a call already in flight.
     assert not hasattr(rb, "REPLAN_EVERY") and not hasattr(rb, "REPLAN_BLOCKED")
-    assert rb.VLM_SEE_D - rb.VLM_STOP_D > 0
+    assert rb.VLM_REACH_D - rb.VLM_STOP_D > 0

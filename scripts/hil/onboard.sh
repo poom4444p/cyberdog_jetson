@@ -31,7 +31,7 @@
 #                                   paths logged ($CYBERDOG/output/shadow_log.jsonl), the
 #                                   map route drives, no VLM speed cap (up to MAX_V);
 #                                   steer = VAMOS steers (--vamos), pace capped by its
-#                                   latency (run_building.VLM_SEE_D, ~0.32 m/s on the J4012)
+#                                   latency (run_building.VLM_REACH_D, ~0.81 m/s at 1.8 s)
 #   IFACE                           DDS interface to the world (USB-C: l4tbr0)
 #   POLICY                          walking policy, relative to GO2_BOARD
 #   STALE_MS                        go limp after this long without a state. 200 for

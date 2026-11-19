@@ -133,13 +133,18 @@ PLAN_HOLD_S = 0.5
 # on the J4012 (2.6 s a call). VAMOS watches all the time; there are no
 # event-only calls.
 #
-# How fast the dog may walk on VAMOS's word: a hazard only VAMOS can see (a
-# flat puddle; the LiDAR does not) can come into view just after a frame was
-# taken. The next frame is asked when the current answer lands, L later, and
-# its answer lands another L after that: 2 L from first in view to known.
-# In that time the dog must not walk past where it first saw it, less the
-# room to stop. VLM_SEE_D is an estimate (placeholder camera config).
-VLM_SEE_D = 2.0           # m ahead the camera sees a flat puddle
+# How fast the dog may walk on VAMOS's word: an answer is planned from a
+# frame taken L before it lands, and it is followed until the next answer
+# lands, another L later: 2 L from frame to fresh plan. In that time the dog
+# must not walk off the end of what VAMOS planned, less the room to stop.
+# VLM_REACH_D is how far ahead VAMOS plans: HIL steer 11-19 (merged_L, 403
+# answers), dog to chosen path end median 3.3 m, p75 3.5 m; the short ones
+# end at the destination, where the dog stops anyway. People and walls are
+# not on this cap: the LiDAR and the planner check safety every REPLAN_S.
+# At the median the cap is ~MAX_V at L = 1.8 s (merged_L, 0.81 m/s): it only
+# bites when VAMOS is slower (2.8 s: 0.52 m/s). 3.0 m (0.72 m/s) failed
+# Gate D D6 on its own (seed 1, 11-19: 1.20x the map-only time).
+VLM_REACH_D = 3.3         # m ahead VAMOS plans (chosen path end, median)
 VLM_STOP_D = 0.4          # m to stop from walking pace
 VLM_CAP_N = 5             # the cap goes on the slowest of the last this many answers
 # Shadow mode: a proposal whose heading is further than this off the map's
@@ -1827,14 +1832,14 @@ class Run:
         self.vlm["asked"] += 1
 
     def vlm_speed_cap(self):
-        """Fastest the dog may walk on VAMOS's word, m/s: see VLM_SEE_D.
+        """Fastest the dog may walk on VAMOS's word, m/s: see VLM_REACH_D.
 
-        (VLM_SEE_D - VLM_STOP_D) / 2 L, L the slowest of the last VLM_CAP_N
+        (VLM_REACH_D - VLM_STOP_D) / 2 L, L the slowest of the last VLM_CAP_N
         answers, or the expected latency (--vlm-latency, else VLM_LATENCY)
         before any has landed. A slower VAMOS slows the dog with it.
         """
         lat = max(self.vlm_lat) if self.vlm_lat else (self.vlm_latency or VLM_LATENCY)
-        cap = (VLM_SEE_D - VLM_STOP_D) / (2.0 * max(lat, self.robot.CONTROL_DT))
+        cap = (VLM_REACH_D - VLM_STOP_D) / (2.0 * max(lat, self.robot.CONTROL_DT))
         if self.vlm["cap_min"] is None or cap < self.vlm["cap_min"]:
             self.vlm["cap_min"] = cap
         return cap
@@ -3232,7 +3237,7 @@ class Run:
                 # The guard watches the floor now, at its own pace: see floor_guard.
                 cruise = min(cruise, self.fg.cap())
             elif self.vamos:
-                cruise = min(cruise, self.vlm_speed_cap())   # see VLM_SEE_D
+                cruise = min(cruise, self.vlm_speed_cap())   # see VLM_REACH_D
             pace = self.pace.ratio
             follow_cap, pass_shift, lead = self.follow_lead(tracks, (x, y), yaw, waypoints, i,
                                                             gates, cruise * pace,
@@ -3433,7 +3438,7 @@ class Run:
                         moved["destination"] = aim
                         state = moved
 
-            # Asked back to back (see VLM_SEE_D): as soon as the last answer
+            # Asked back to back (see VLM_REACH_D): as soon as the last answer
             # has landed, from this tick's frame; the loop carries on either
             # way. `asked` is an answer arriving this tick.
             if ((self.vamos or self.shadow) and state["state"] == "TRACK"
@@ -4531,7 +4536,7 @@ def main():
             lat = max(run.vlm_lat) if run.vlm_lat else float("nan")
             print(f"VLM SPEED CAP: {run.vlm_speed_cap():.2f} m/s at the end "
                   f"(slowest of the last {len(run.vlm_lat)} answers {lat:.1f}s), "
-                  f"lowest {v['cap_min']:.2f} m/s; ({VLM_SEE_D} - {VLM_STOP_D}) m / 2 L")
+                  f"lowest {v['cap_min']:.2f} m/s; ({VLM_REACH_D} - {VLM_STOP_D}) m / 2 L")
     if run.shadow is not None:
         run.shadow.close()
         sn = run.shadow_n
