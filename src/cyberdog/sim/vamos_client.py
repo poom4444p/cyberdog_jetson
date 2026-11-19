@@ -24,7 +24,10 @@ ranks (safest first, progress second) and throttles (the chosen path's factor
 scales the dog's speed, so a tight path is walked slowly rather than briskly).
 """
 import io
+import json
 import math
+import os
+import time
 
 import requests
 from PIL import Image
@@ -72,12 +75,47 @@ def ahead(path, xy):
     return path[k:]
 
 
+class FrameLog:
+    """--frame-log: every frame sent to VAMOS, saved with what came back.
+
+    Measurement only, nothing reads it back. Per call, in `root`:
+    NNNNN.jpg (the image as VAMOS got it) and NNNNN.json (wall time, floor,
+    lens pose, prompt, VAMOS's pixel paths, the same projected to the map,
+    and -- once judged -- each candidate's verdict and which was chosen).
+    scripts/vamos/frames.py draws the paths on the frames.
+    """
+
+    def __init__(self, root):
+        self.root = root
+        os.makedirs(root, exist_ok=True)
+        self.seq = 0
+
+    def save(self, image, record):
+        """Write one frame and its request; returns its sequence number."""
+        n, self.seq = self.seq, self.seq + 1
+        Image.fromarray(image).save(os.path.join(self.root, f"{n:05d}.jpg"), quality=90)
+        self.write(n, record)
+        return n
+
+    def write(self, n, record):
+        with open(os.path.join(self.root, f"{n:05d}.json"), "w") as f:
+            json.dump(record, f)
+
+
+def _rnd(path):
+    return [[round(a, 3), round(b, 3)] for a, b in path]
+
+
 class VamosPolicy:
     """Asks the VLM for paths, scores them, returns the winner in map frame."""
 
     def __init__(self, cam, is_free, dream=None, url=DEFAULT_URL, num_samples=5,
-                 timeout=120, sample=False, affordance=None):
+                 timeout=120, sample=False, affordance=None, frame_log=None, floor=None):
         self.cam = cam
+        # FrameLog or None; the record of the call deliver() will judge next
+        # (one call at a time: the brain never asks while one is running).
+        self.frame_log, self.floor = frame_log, floor
+        self.frame_rec = None
         self.is_free = is_free          # (x, y) -> bool, stands in for the affordance MLP
         self.dream = dream              # dreaming.Dream, or None for geometry only
         # (paths, pose) -> one class name per path ("walkable", "caution",
@@ -176,13 +214,22 @@ class VamosPolicy:
         the image was taken at -- which is what lets deliver() judge them from
         wherever the dog has got to by the time they arrive.
         """
+        rec = None
+        if self.frame_log is not None:
+            rec = {"wall_t": round(time.time(), 3), "floor": self.floor,
+                   "cam_pose": [round(v, 4) for v in cam_pose], "prompt": prompt}
+            rec["seq"] = self.frame_log.save(image, rec)
+            self.frame_rec = rec
         try:
             pixel_paths = self._request(image, prompt)
         except (requests.RequestException, ValueError) as e:
             self.last_error = f"{type(e).__name__}: {e}"[:200]
+            if rec is not None:
+                rec["error"] = self.last_error
+                self.frame_log.write(rec["seq"], rec)
             return None
 
-        paths = []
+        paths, kept = [], []       # kept[i]: pixel path i's map path, or None
         for pp in pixel_paths:
             pts = [g for g in (pixel_to_ground(u, v, self.cam, cam_pose) for u, v in pp)
                    if g is not None]
@@ -190,9 +237,32 @@ class VamosPolicy:
             dedup = [p for k, p in enumerate(pts) if k == 0 or math.dist(p, pts[k - 1]) > 0.05]
             if len(dedup) >= 2:
                 paths.append(dedup)
+            kept.append(dedup if len(dedup) >= 2 else None)
+        if rec is not None:
+            rec["latency_s"] = round(time.time() - rec["wall_t"], 3)
+            rec["pixel_paths"] = [[[round(u, 1), round(v, 1)] for u, v in pp]
+                                  for pp in pixel_paths]
+            # Aligned with pixel_paths; None where too little was below the horizon.
+            rec["map_paths"] = [None if p is None else _rnd(p) for p in kept]
+            self.frame_log.write(rec["seq"], rec)
         return paths
 
     def deliver(self, paths, pose, destination):
+        """See _deliver; with --frame-log, also records what became of the
+        candidates in the frame's record."""
+        out = self._deliver(paths, pose, destination)
+        rec, self.frame_rec = self.frame_rec, None
+        if rec is not None:
+            chosen = out[0]
+            rec["judged_pose"] = [round(v, 4) for v in pose]
+            rec["verdicts"] = [{"path": _rnd(p), "verdict": v,
+                                "factor": None if f is None else round(f, 4),
+                                "chosen": p is chosen} for p, f, v in self.verdicts]
+            rec["safety"] = round(out[2], 4)
+            self.frame_log.write(rec["seq"], rec)
+        return out
+
+    def _deliver(self, paths, pose, destination):
         """The fast half: judge a request's answer from `pose`, the body pose
         *now*. Returns (chosen_path, all_paths, safety), as plan() does.
 

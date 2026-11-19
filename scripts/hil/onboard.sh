@@ -52,6 +52,8 @@
 #                                   $CYBERDOG/output/tracks.jsonl (--track-log)
 #   CLOUD_LOG=1                     brain saves its scans to
 #                                   $CYBERDOG/output/clouds.npz (--cloud-log)
+#   FRAME_LOG=1                     brain saves every frame sent to VAMOS and its
+#                                   answer to $CYBERDOG/output/frames/ (--frame-log)
 #   POSE=lio                        board: report the Mid-360's odometry as the pose,
 #                                   not the world's (board_main --pose lio)
 #   LIO_RECORD=DIR                  board: save the raw Mid-360 frames, its IMU and
@@ -156,6 +158,10 @@ case "${1:-}" in
     if [ "${CLOUD_LOG:-0}" = 1 ]; then
         mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/clouds.npz"
         tracklog+=(--cloud-log "$CYBERDOG/output/clouds.npz")
+    fi
+    if [ "${FRAME_LOG:-0}" = 1 ]; then
+        rm -rf "$CYBERDOG/output/frames" && mkdir -p "$CYBERDOG/output/frames"
+        tracklog+=(--frame-log "$CYBERDOG/output/frames")
     fi
     # MUJOCO_GL=egl: the twin still renders (CAMERA=0's view, ground truth)
     # with no display; on the dog the camera is a USB one.
