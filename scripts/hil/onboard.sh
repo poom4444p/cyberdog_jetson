@@ -17,6 +17,11 @@
 # Settings (environment, defaults for the rig as set up on the J4012):
 #   CYBERDOG GO2_BOARD GO2ENV       this repo, go2_board/ in it, and their venv
 #   VAMOS_DIR VAMOS_ENV VAMOS_PORT  the VAMOS server, its venv and port
+#   VAMOS_MODEL                     the model it loads (default mateoguaman/vamos, the
+#                                   base); a path with "lora" in it loads as base + adapter
+#                                   (slower), so give a fine-tune merged
+#                                   (scripts/vamos/merge_lora.py), e.g.
+#                                   $CYBERDOG/models/vamos_L_merged
 #   VAMOS_LOC_HEAD                  1 (default) = beam search over <loc> tokens + EOS only
 #                                   (vlm_server.py --loc_head; loc_head.py); 0 = generate()
 #   VAMOS_GOAL_TAIL                 1 (default) = decode 4 points, end every path at the
@@ -56,6 +61,7 @@ GO2ENV=${GO2ENV:-$HOME/go2env}
 VAMOS_DIR=${VAMOS_DIR:-$CYBERDOG/vendor/VAMOS/server}   # synced with the repo (run_hil.sh sync)
 VAMOS_ENV=${VAMOS_ENV:-$HOME/vamosenv}
 VAMOS_PORT=${VAMOS_PORT:-8009}
+VAMOS_MODEL=${VAMOS_MODEL:-mateoguaman/vamos}
 VAMOS_LOC_HEAD=${VAMOS_LOC_HEAD:-1}
 VAMOS_GOAL_TAIL=${VAMOS_GOAL_TAIL:-1}
 VAMOS_MODE=${VAMOS_MODE:-shadow}
@@ -80,17 +86,23 @@ vamos_to_brain_cores() {
 
 case "${1:-}" in
   vamos)
-    if vamos_up; then echo "VAMOS: already up"; exit 0; fi
+    if vamos_up; then
+        # Not restarted: say which model is up, the one asked for or not.
+        up=$(curl -s --max-time 2 "http://127.0.0.1:$VAMOS_PORT/health" | sed -n 's/.*"model_path": *"\([^"]*\)".*/\1/p')
+        echo "VAMOS: already up ($up)"
+        [ "$up" = "$VAMOS_MODEL" ] || echo "VAMOS: WARNING not VAMOS_MODEL=$VAMOS_MODEL; onboard.sh stop all first to switch"
+        exit 0
+    fi
     # Only the server goes in the background, with every fd off ssh's: a
     # backgrounded `cd && . && nohup ...` keeps a shell on ssh's stdout, and
     # the ssh that started it never returns.
     (cd "$VAMOS_DIR" || exit 1; . "$VAMOS_ENV/bin/activate"
      HF_HUB_OFFLINE=1 nohup taskset -c "$BRAIN_CORES" python vlm_server.py --host 127.0.0.1 \
-         --port "$VAMOS_PORT" --model_path mateoguaman/vamos \
+         --port "$VAMOS_PORT" --model_path "$VAMOS_MODEL" \
          $([ "$VAMOS_LOC_HEAD" = 1 ] && echo --loc_head) \
          $([ "$VAMOS_GOAL_TAIL" = 1 ] && echo --goal_tail) > "$VAMOS_LOG" 2>&1 < /dev/null &)
     for _ in $(seq 1 120); do
-        vamos_up && { echo "VAMOS: up"; exit 0; }
+        vamos_up && { echo "VAMOS: up ($VAMOS_MODEL)"; exit 0; }
         sleep 2
     done
     echo "VAMOS: not up after 240 s, see $VAMOS_LOG"; exit 1 ;;
@@ -158,7 +170,9 @@ case "${1:-}" in
 
   status)
     pgrep -af "[b]oard_main|[r]un_building|[v]lm_server" || echo "nothing running"
-    if vamos_up; then echo "VAMOS: up"; else echo "VAMOS: down"; fi
+    if vamos_up; then
+        echo "VAMOS: up ($(curl -s --max-time 2 "http://127.0.0.1:$VAMOS_PORT/health" | sed -n 's/.*"model_path": *"\([^"]*\)".*/\1/p'))"
+    else echo "VAMOS: down"; fi
     echo "clock: $(date -u '+%Y-%m-%d %H:%M:%S UTC') (no RTC: wrong after a boot until set)"
     nvpmodel -q 2>/dev/null | head -1 ;;
 

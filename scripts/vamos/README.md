@@ -16,7 +16,8 @@ frames from the brain rig (`docs/spec.md`, L4).
 | 2. Collect held-out data | `python scripts/vamos/collect.py --test` | `cyberdog_sim` | ~1 min |
 | 3. Train | `python scripts/vamos/train_lora.py` | `vamos_mac` (or a CUDA box) | hours on a GPU; far longer on a Mac |
 | 4. Score base, then adapter | `python scripts/vamos/evaluate.py --name base` then `--name lora --load <repo>/models/vamos_lora` | `cyberdog_sim` + server | ~10 min each |
-| 5. Closed loop | in `vendor/VAMOS/server`: `bash start_server.sh --model_path <repo>/models/vamos_lora` (absolute path), then from the repo root `python scripts/gate_d.py` | both | a Gate D campaign |
+| 5. Merge for the board | `python scripts/vamos/merge_lora.py models/vamos_lora_L models/vamos_L_merged --check 8`; scp it to the board, then `VAMOS_MODEL=<board path> onboard.sh vamos` | `vamos_mac` | ~5 min + copy |
+| 6. Closed loop | in `vendor/VAMOS/server`: `bash start_server.sh --model_path <repo>/models/vamos_lora` (absolute path), then from the repo root `python scripts/gate_d.py` | both | a Gate D campaign |
 
 The server keeps the last model it loaded, including one loaded by
 `evaluate.py --load`. So step 4's `--name base` must come before any `--load`,
@@ -56,6 +57,11 @@ Gemma language model; SigLIP is untouched. The prompt is built through the
 same processor call as `vlm_server.py`, so training sees the exact tokens
 inference does. The output directory must have `lora` in its name, since that
 is how the server decides to load a path as an adapter.
+
+On the J4012 an unmerged adapter costs 2.6 s a call against the base's 1.8 s.
+`merge_lora.py` folds it into the base (a merged model must NOT have `lora`
+in its path): lora_L merged runs at 1.80 s median and scores the same as the
+adapter on vamos_L/test (none 5.5% vs 6.0%, detour top_path 0.216 m both).
 
 What the labels teach is the map-only stack's own walk, which is clean on
 every Gate D route but not perfect. A model trained on it can at best match
