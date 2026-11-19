@@ -221,10 +221,13 @@ Measured by `tests/selftest.py latency` on an M-series Mac:
 
 The control loop runs at 20 Hz; VAMOS is asked back to back, as soon as the
 last answer lands, from the newest frame (one call at a time, ~2.45 s on the
-J4012 with `--loc_head`). Under `--vamos` the dog's pace is capped by that cycle: a hazard only
-VAMOS sees is known at worst 2 L after it comes into view, so
-`v <= (VLM_SEE_D - VLM_STOP_D) / 2 L` (2.0 m and 0.4 m, estimates; ~0.32 m/s
-at L = 2.45 s), L the slowest of the last few answers.
+J4012 with `--loc_head`). Under `--vamos` the dog's pace is capped by that cycle: an answer
+is planned from a frame L old when it lands and followed until the next lands, L later, so
+in 2 L the dog must not walk off the end of VAMOS's plan:
+`v <= (VLM_REACH_D - VLM_STOP_D) / 2 L` (3.3 m, the measured reach of VAMOS's chosen
+path, HIL 11-19 median; 0.4 m to stop; 0.81 m/s, i.e. ~`MAX_V`, at L = 1.8 s, merged_L), L the
+slowest of the last few answers. (Until 11-19 this used `VLM_SEE_D` = 2.0 m, a guess at
+how far the camera sees a flat puddle: 0.44 m/s at 1.8 s, Gate D D6 failed on every route.)
 
 On the HIL rig VAMOS runs in shadow by default (`VAMOS_MODE=shadow` in
 `scripts/hil/onboard.sh` / `run_hil.sh`; `steer` is `--vamos` as above). It is
