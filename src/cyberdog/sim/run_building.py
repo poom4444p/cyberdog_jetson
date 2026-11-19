@@ -4315,6 +4315,10 @@ def main():
                          "aligning the scans' walls to the map (sensing/map_fix.py)")
     ap.add_argument("--lift-host", default="127.0.0.1", metavar="IP",
                     help="with --robot go2_board: where go2_world's lift takes calls (udp 9880)")
+    ap.add_argument("--camera-host", default=None, metavar="IP",
+                    help="with --robot go2_board: the dog's camera from go2_world there "
+                         "(run_world --camera, tcp 9883), people and all; default the twin's "
+                         "own render, which has no people")
     ap.add_argument("--brain-listen", default=None, metavar="IP",
                     help="this machine's address on the link to the board (192.168.55.100)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
@@ -4363,7 +4367,8 @@ def main():
             from cyberdog.sim.robot.go2_board_robot import LiftLink
             robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN,
                                    board_host=args.board_host, listen=args.brain_listen,
-                                   lift=LiftLink(args.lift_host), clouds=not args.twin_lidar)
+                                   lift=LiftLink(args.lift_host), clouds=not args.twin_lidar,
+                                   camera_host=args.camera_host)
             if not args.no_map_fix and not args.twin_lidar:
                 from cyberdog.sim.sensing.map_fix import MapFix
                 robot.map_fix = MapFix()                # see sensing/map_fix.py
