@@ -36,6 +36,10 @@
 #   VAMOS_MODE   route: shadow (default: VAMOS logged, the map drives, no VLM speed
 #                cap; its log copied to $OUT/shadow_log.jsonl) or steer (VAMOS steers,
 #                pace capped by its latency). See onboard.sh.
+#   VAMOS_MODEL  the model VAMOS loads on the board when it starts (onboard.sh's
+#                default: the base), an absolute path on the board, e.g.
+#                /home/jittarin/cyberdog_jetson/models/vamos_L_merged; a
+#                VAMOS already up keeps its model (onboard.sh warns): stop it first
 #   BRAIN_ARGS   route: more run_building arguments, e.g. "--puddles 2 --floor-guard sim"
 #   VAMOS_STEER  route: a preference added after the goal in every VAMOS prompt
 #                (--vamos-steer), e.g. "Keep to the left wall."; kept as one argument,
@@ -226,7 +230,7 @@ case "${1:-}" in
     echo "pose: $POSE, LiDAR $([ "$DENSE" = 1 ] && echo dense || echo sparse)"
     trap stop_all EXIT
     start_world
-    on_board "$ONBOARD vamos"
+    on_board "${VAMOS_MODEL:+VAMOS_MODEL=$(printf %q "$VAMOS_MODEL") }$ONBOARD vamos"
     if [ "$LIO_RECORD" = 1 ]; then
         on_board "rm -rf ~/$LIO_DIR; POSE=$POSE LIO_RECORD=~/$LIO_DIR $ONBOARD board" | tail -2
     else
