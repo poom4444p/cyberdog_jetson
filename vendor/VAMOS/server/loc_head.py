@@ -98,7 +98,11 @@ class LocHeadDecoder:
         max_length = P + max_new_tokens
         dev = ids.device
         V = self.V
-        body = self.model.model                                # PaliGemmaModel: hidden states, no head
+        # PaliGemmaModel: hidden states, no head. A LoRA (PeftModel) forwards
+        # `.model` to the whole LM, which returns logits: unwrap it first (the
+        # adapter's layers sit inside the base model, so they still apply).
+        base = self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
+        body = base.model
 
         # prefill at batch 1, cache repeated to the beams
         kw = {k: v for k, v in model_input.items() if k != "labels"}
