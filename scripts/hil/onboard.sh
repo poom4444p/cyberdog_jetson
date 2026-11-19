@@ -39,6 +39,9 @@
 #                                   100+ ms; empty for board_main's own 50 ms, the
 #                                   limit for anything with real motors
 #   LIFT_HOST                       where the world takes lift calls (the Mac)
+#   CAMERA=0                        brain: VAMOS sees the twin's own render (no people),
+#                                   not the dog's camera from the world on LIFT_HOST
+#                                   (run_world --camera, tcp 9883; default 1)
 #   BOARD_CORES BRAIN_CORES         taskset lists
 #   TRACE=1                         brain prints its commands, ~5 lines/s
 #   BRAIN_ARGS                      more run_building arguments, e.g.
@@ -69,6 +72,7 @@ IFACE=${IFACE:-l4tbr0}
 POLICY=${POLICY:-policies/go2_flat_v5}
 STALE_MS=${STALE_MS-200}
 LIFT_HOST=${LIFT_HOST:-192.168.55.100}
+CAMERA=${CAMERA:-1}
 BOARD_CORES=${BOARD_CORES:-6,7}
 BRAIN_CORES=${BRAIN_CORES:-0-5}
 TRACE=${TRACE:-0}
@@ -141,6 +145,9 @@ case "${1:-}" in
     echo "VAMOS_MODE=$VAMOS_MODE${VAMOS_STEER:+ VAMOS_STEER=$VAMOS_STEER}"
     steer=()
     [ -n "${VAMOS_STEER:-}" ] && steer=(--vamos-steer "$VAMOS_STEER")
+    camera=()
+    [ "$CAMERA" = 1 ] && camera=(--camera-host "$LIFT_HOST")
+    echo "camera: $([ "$CAMERA" = 1 ] && echo "the world's, from $LIFT_HOST" || echo "the twin's (no people)")"
     tracklog=()
     if [ "${TRACK_LOG:-0}" = 1 ]; then
         mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/tracks.jsonl"
@@ -150,10 +157,10 @@ case "${1:-}" in
         mkdir -p "$CYBERDOG/output" && rm -f "$CYBERDOG/output/clouds.npz"
         tracklog+=(--cloud-log "$CYBERDOG/output/clouds.npz")
     fi
-    # MUJOCO_GL=egl: the camera view VAMOS is shown is rendered with no display
-    # (23 ms a frame); on the dog it comes from a USB camera.
+    # MUJOCO_GL=egl: the twin still renders (CAMERA=0's view, ground truth)
+    # with no display; on the dog the camera is a USB one.
     MUJOCO_GL=egl exec taskset -c "$BRAIN_CORES" python -u "${run[@]}" "$dest" --robot go2_board \
-        --lift-host "$LIFT_HOST" "${mode[@]}" --vamos-samples "$samples" --auto-confirm --no-video "${tracklog[@]}" \
+        --lift-host "$LIFT_HOST" "${mode[@]}" --vamos-samples "$samples" --auto-confirm --no-video "${camera[@]}" "${tracklog[@]}" \
         "${steer[@]}" ${BRAIN_ARGS:-} ;;
 
   stop)

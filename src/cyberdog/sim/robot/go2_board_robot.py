@@ -8,13 +8,17 @@ legs, safety and the walking policy; nothing here touches a motor.
 Needs go2_board installed (pip install -e ~/Work/unitree/go2_board). The
 import is inside __init__, so the twin runs without it.
 
-Not yet: get_scan and get_image. In the sim they come from the physics twin
-of the building (B6); on the dog, from the Mid-360 and the camera.
+get_scan is the board's Mid-360 cloud; get_image, with camera_host, is the
+dog's camera as go2_world renders it (CameraLink), people and all. Without
+either they come from the physics twin, which has no people.
 """
 import collections
+import io
 import json
 import math
 import socket
+import struct
+import threading
 import time
 
 import numpy as np
@@ -188,6 +192,106 @@ class Go2BoardRobot(RobotInterface):
         self.link.close()
 
 
+class CameraLost(BoardStopped):
+    """No fresh frame from the dog's camera: VAMOS would be shown an old
+    view of a corridor people walk in. The run ends and says so."""
+    layer = "camera"
+
+
+# go2_world/camera.py's wire format (its tests and test_camera_link keep the two the same).
+CAM_PORT = 9883
+CAM_MAGIC = b"GCAM"
+CAM_HEAD = struct.Struct("<4sIddI")     # magic, seq, world time s, sender wall time s, jpeg length
+
+
+class CameraLink:
+    """The dog's camera, as frames from go2_world over TCP (a USB camera on
+    the dog): pixels only, never where anything is.
+
+    A thread reads every frame as it comes and keeps the newest, still JPEG;
+    it is decoded only when asked for (get), once per frame. A dropped link
+    is reconnected every RETRY_S."""
+    RETRY_S = 1.0
+
+    def __init__(self, host, port=CAM_PORT, clock=time.monotonic):
+        self.addr, self.clock = (host, port), clock
+        self._lock = threading.Lock()
+        self._newest = None            # (seq, arrived on this clock, jpeg)
+        self._decoded = (None, None)   # (seq, image)
+        self._stop = threading.Event()
+        self._thread = None
+        self.frames = self.connects = 0
+        self.bytes = 0
+        self.transit_ms = []           # arrival - sender's stamp: the clocks' offset included
+        self.age_ms = []               # how old the frame was when get() handed it over
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="cameralink", daemon=True)
+        self._thread.start()
+        return self
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                with socket.create_connection(self.addr, timeout=2.0) as s:
+                    s.settimeout(1.0)
+                    self.connects += 1
+                    while not self._stop.is_set():
+                        magic, seq, _t, sent, n = CAM_HEAD.unpack(self._read(s, CAM_HEAD.size))
+                        if magic != CAM_MAGIC:
+                            raise OSError(f"not a camera frame: {magic!r}")
+                        jpeg = self._read(s, n)
+                        now = self.clock()
+                        self.frames += 1
+                        self.bytes += n
+                        self.transit_ms.append((time.time() - sent) * 1000)
+                        with self._lock:
+                            self._newest = (seq, now, jpeg)
+            except (OSError, struct.error):
+                self._stop.wait(self.RETRY_S)
+
+    def _read(self, s, n):
+        out = bytearray()
+        while len(out) < n:
+            try:
+                chunk = s.recv(n - len(out))
+            except socket.timeout:
+                if self._stop.is_set():
+                    raise OSError("closing")
+                continue
+            if not chunk:
+                raise OSError("the camera closed the link")
+            out += chunk
+        return bytes(out)
+
+    def get(self):
+        """(image HxWx3 uint8, its age in s), or (None, None) before any frame."""
+        with self._lock:
+            newest = self._newest
+        if newest is None:
+            return None, None
+        seq, arrived, jpeg = newest
+        if self._decoded[0] != seq:
+            from PIL import Image
+            self._decoded = (seq, np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB")))
+        age = self.clock() - arrived
+        self.age_ms.append(age * 1000)
+        return self._decoded[1], age
+
+    def report(self):
+        med = lambda v: sorted(v)[len(v) // 2] if v else float("nan")
+        return (f"camera {self.addr[0]}:{self.addr[1]}: {self.frames} frames "
+                f"({self.bytes / max(self.frames, 1) / 1024:.0f} KB each), {self.connects} connect(s), "
+                f"transit median {med(self.transit_ms):.0f} ms (clock offset included), "
+                f"age when used median {med(self.age_ms):.0f} ms max "
+                f"{max(self.age_ms) if self.age_ms else float('nan'):.0f} ms")
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+
+
 # -- the board in run_building -------------------------------------------------
 
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot  # noqa: E402
@@ -217,10 +321,12 @@ class BoardTwinRobot(MujocoRobot):
     ARRIVED_M, SETTLE_S, RIDE_TIMEOUT_S = 0.05, 1.0, 60.0
 
     CLOUD_STALE_S = 0.5       # an older cloud is no cloud: the brain is blind, as the board is
+    CAM_STALE_S = 1.0         # an older frame is no frame: the run ends (CameraLost)
+    CAM_FIRST_S = 10.0        # the first frame: the world's camera may still be starting
     NO_STATE_S = 1.0          # no board state this long mid-walk ends the run (see _follow)
 
     def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0),
-                 board_host=None, listen=None, lift=None, clouds=True):
+                 board_host=None, listen=None, lift=None, clouds=True, camera_host=None):
         self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
         self._no_state_since = None    # board clock since when no state came, in _follow
         # The board's pose put back on the map (sensing/map_fix.py), or None:
@@ -240,6 +346,10 @@ class BoardTwinRobot(MujocoRobot):
             if self.clouds.rcvbuf_short:
                 print(f"[udp] WARNING: cloud socket rcvbuf capped at "
                       f"{self.clouds.rcvbuf >> 10} KB: raise net.core.rmem_max")
+        # The dog's camera from go2_world (people in it), or None: the twin's
+        # own render, which has none.
+        self.camera = CameraLink(camera_host).start() if camera_host else None
+        self._camera_since = None
         x, y, yaw = self._wait_for_pose()
         super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
 
@@ -411,6 +521,28 @@ class BoardTwinRobot(MujocoRobot):
             out = self.map_fix.refine(out, (x, y))
         return out
 
+    def get_image(self):
+        """The dog's camera: the newest frame from go2_world (camera_host),
+        or the twin's render without it. A frame older than CAM_STALE_S
+        (or none CAM_FIRST_S after the first ask) ends the run: VAMOS must
+        not plan on a stale view."""
+        if self.camera is None:
+            return MujocoRobot.get_image(self)
+        now = self.board.clock()
+        if self._camera_since is None:
+            self._camera_since = now
+        while True:
+            img, age = self.camera.get()
+            if img is not None and age <= self.CAM_STALE_S:
+                return img
+            if img is not None:
+                raise CameraLost(f"the camera's newest frame is {age:.1f} s old "
+                                 f"(more than {self.CAM_STALE_S:.1f} s)")
+            if self.board.clock() - self._camera_since > self.CAM_FIRST_S:
+                raise CameraLost(f"no frame from the camera at {self.camera.addr[0]}:"
+                                 f"{self.camera.addr[1]} in {self.CAM_FIRST_S:.0f} s")
+            time.sleep(0.05)
+
     def _cloud_seen(self, c):
         """When this cloud first arrived here, on this side's clock."""
         if c.seq != getattr(self, "_cloud_seq", None):
@@ -427,6 +559,9 @@ class BoardTwinRobot(MujocoRobot):
         if self.clouds is not None:
             line += "; " + self.clouds.report()
         print(line)
+        if self.camera is not None:
+            print(f"[camera] {self.camera.report()}")
+            self.camera.close()
         self.board.close()
         if self.lift is not None:
             self.lift.close()

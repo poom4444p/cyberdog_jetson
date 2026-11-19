@@ -24,8 +24,10 @@
 #   GO2_WORLD    the go2_world checkout             (~/Work/unitree/go2_world)
 #   REMOTE       this repo on the board, under ~    (cyberdog_jetson)
 #   PY           Python with go2_world's packages   (python)
-#   PEOPLE       people walking in the world        (4)
+#   PEOPLE       people walking in the world, PER FLOOR (4; 0-6, go2_world crowd.LANES)
 #   WORLD_ARGS   more run_world arguments, e.g. --held-pd
+#   CAMERA=0     route: VAMOS sees the twin's own render (no people) instead of the dog's
+#                camera rendered in the world (run_world --camera, tcp 9883 on MAC_IP)
 #   LIDAR_ARGS   more run_lidar arguments, e.g. --imu-noise (a real unit's IMU)
 #   VIEWER=1     the world with MuJoCo's viewer (mjpython next to PY), to watch or
 #                screen-record a run; it can hold the physics long enough to trip
@@ -81,6 +83,7 @@ DENSE=${DENSE:-}
 VIEWER=${VIEWER:-0}
 RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
+CAMERA=${CAMERA:-1}
 TRACK_LOG=${TRACK_LOG:-0}
 VAMOS_MODE=${VAMOS_MODE:-shadow}
 VAMOS_STEER=${VAMOS_STEER:-}
@@ -136,6 +139,7 @@ start_world() {
         echo "world: with the viewer (double-click the dog, then Ctrl+right double-click to follow it)"
     fi
     [ "$RECORD" = 1 ] && world+=(--record="$OUT/world.mp4")
+    [ "$CAMERA" = 1 ] && world+=(--camera="$MAC_IP")
     local p
     for p in $PUDDLES; do
         # shellcheck disable=SC2086
@@ -146,7 +150,7 @@ start_world() {
         --lift-listen="$MAC_IP" $WORLD_ARGS "$MAC_IF" > "$OUT/world.log" 2>&1 < /dev/null &)
     for _ in $(seq 1 30); do grep -q "people walking" "$OUT/world.log" 2>/dev/null && break; sleep 0.5; done
     grep -q "people walking" "$OUT/world.log" || { echo "world: did not start, see $OUT/world.log"; exit 1; }
-    grep -E "^world:|^lift:" "$OUT/world.log"
+    grep -E "^world:|^lift:|^camera:" "$OUT/world.log"
     (cd "$GO2_WORLD" || exit 1; nohup "$PY" -u scripts/run_lidar.py --interface "$MAC_IF" \
         --host "${BOARD#*@}" $LIDAR_ARGS > "$OUT/lidar.log" 2>&1 < /dev/null &)
     sleep 13                                   # the emulator loads the scene, then streams
@@ -239,8 +243,8 @@ case "${1:-}" in
     start_gaps
     brain_args=${BRAIN_ARGS:-}
     for p in $PUDDLES; do brain_args+=" --puddle-at $p"; done
-    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
-    grep -E "VAMOS_MODE|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
+    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE CAMERA=$CAMERA TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    grep -E "VAMOS_MODE|^camera:|\[camera\]|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
     # The board first (it prints the odometry's error and how it stopped on its
@@ -251,7 +255,7 @@ case "${1:-}" in
     on_board "$ONBOARD stop" > /dev/null 2>&1
     on_board "$ONBOARD log" | tail -n +3
     stop_world
-    grep -E "^world: t=|^world truth:" "$OUT/world.log" | cut -c1-230
+    grep -E "^world: t=|^world truth:|^camera: [0-9]" "$OUT/world.log" | cut -c1-230
     if [ "$TRACK_LOG" = 1 ]; then
         scp -q -o BatchMode=yes "$BOARD:$REMOTE/output/tracks.jsonl" "$OUT/tracks.jsonl" \
             && echo "tracks: $OUT/tracks.jsonl" || echo "tracks: not copied"
