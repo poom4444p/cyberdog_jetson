@@ -90,7 +90,7 @@ dreamed, then driven on the twin with the live loop's `MAX_V` / `MAX_W`.
 |---|---|---|---|
 | B7 | Candidates measured | **≥ 128** | ✅ checked |
 | B8 | Hazard candidates (line passes closer than `ROOMY` = 0.40 to a wall, door jamb or the stairwell, in clearance-field units) | **≥ 32** | ✅ checked |
-| B9 | **False passes**: passed candidates whose driven P(collision) > 0.2 — screened at 30 drives, confirmed at 200 | **0** | ✅ checked |
+| B9 | **False passes**: candidates the gate passes on ≥ 5% of 50 dream seeds whose driven P(collision) > 0.2 — screened at 30 drives, confirmed at 200 | **0** | ❌ **3** (2026-11-21, see below) |
 | B10 | Calibration: mean \|dreamed P(safe) − driven P(safe)\| | **≤ 0.10** | ✅ checked |
 | B11 | Stress: false passes with the twin's noise ×1.5 | report only | ✅ printed |
 | B12 | Rejected though every drive was clean | report only (by design in tight rooms) | ✅ printed |
@@ -99,6 +99,30 @@ Read B9–B10 for what they are: the twin is the same kinematic model the dream
 imagines, so this catches the dream disagreeing with the robot it claims to
 model, not the model disagreeing with the world. Gate A is where that second
 question gets asked.
+
+**B9 fails, and the gate is why (2026-11-21).** B9 used to judge each
+candidate by one dream with one seed (its index). Near the gate 24 rollouts
+wobble, so that single draw said little: it failed on the x = 9 doorway
+candidate, which the gate passes on only 2 of 200 seeds, and it hid three it
+passes far more often. Judged by how often the gate passes a candidate (50
+seeds, a suspect at ≥ 5%), the false passes are three doorway crossings, each
+collision a hit (none a timeout):
+
+| Door | Gate passes it | Driven P(collision), 200 drives | Dreamed P(safe) |
+|---|---|---|---|
+| x = 27, south | 16% of seeds | 0.22 | 0.62 |
+| x = 15, south | 14% | 0.30 | 0.79 |
+| x = 21, north | 10% | 0.29 | 0.71 |
+
+The dream is calibrated (B10 still passes; these three dream within ~0.1 of
+driven). The gate formula lets them through: factor = P(safe) × (FLOOR +
+(1 − FLOOR) × room), so with room enough a path that collides one time in four
+still scores over `GATE` = 0.5 (0.75 × (0.4 + 0.6 × 0.5) = 0.525). B9 asks for
+P(collision) ≤ 0.2 on every pass, which `factor ≥ GATE` alone does not
+guarantee. A "collision" here is clearance under `ROBOT_R` in the inflated
+field, i.e. inside the safety margin, not the body touching the jamb. Open:
+gate on P(safe) as well as on the factor; that changes how VAMOS steers and
+needs Gate D again.
 
 ### B.3 Stability and sanity
 
