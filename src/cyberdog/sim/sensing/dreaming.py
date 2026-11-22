@@ -37,6 +37,34 @@ DT = 0.05                       # 20 Hz, the control rate
 N_DREAMS = 24                   # rollouts per candidate
 ARRIVED_R = 0.2                 # close enough to the path's end to stop early
 
+# The chance constraint, P(safe) >= P_SAFE_MIN, judged on a lower confidence
+# bound rather than on the sample: 24 rollouts wobble by about +/- 0.09, so a
+# path that collides one time in four would read 20/24 = 0.83 often enough to
+# be let through (selftest B9). The bound (Wilson, one-sided 95%) asks for
+# P_SAFE_MIN with confidence instead.
+#
+# Sequential, so the cost is only paid where the answer is in doubt: after
+# N_DREAMS, a path is passed if every rollout survived, refused if even the
+# upper bound is under P_SAFE_MIN, and otherwise dreamed again up to
+# N_DREAMS_MAX and judged on the lower bound of all of them. The early pass is
+# all-or-nothing, not the bound at 24 (which 23/24 would meet): stopping early
+# is a second look at the data, and a borderline path reaching 23/24 by luck is
+# exactly the false pass this is here to stop.
+P_SAFE_MIN = 0.8
+P_SAFE_Z = 1.645                # one-sided 95%
+N_DREAMS_MAX = 96
+
+
+def wilson(k, n, z=P_SAFE_Z):
+    """(lower, upper) Wilson score bounds on a success rate of k out of n."""
+    if n == 0:
+        return 0.0, 1.0
+    p = k / n
+    d = 1 + z * z / n
+    c = p + z * z / (2 * n)
+    r = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return max((c - r) / d, 0.0), min((c + r) / d, 1.0)
+
 # How long to imagine. Long enough to walk the whole path, plus an allowance
 # for turning onto it -- a fixed horizon lets a rollout that starts by pivoting
 # run out of time before it reaches the dangerous end of the path, and a run
@@ -83,11 +111,13 @@ PERSON_R = 0.25
 class Dream:
     """Imagined rollouts of one candidate path, scored for safety."""
 
-    def __init__(self, clearance, max_v, n=N_DREAMS, seed=0, person=None):
+    def __init__(self, clearance, max_v, n=N_DREAMS, seed=0, person=None,
+                 n_max=N_DREAMS_MAX):
         self.clearance = clearance          # (x, y) -> metres to the nearest no-go
         self.person = person                # (x, y, yaw) -> room around the person
         self.max_v = max_v
-        self.n = n
+        self.n = n                          # first batch of rollouts
+        self.n_max = max(n_max, n)          # most, when the first batch is undecided
         self.rng = random.Random(seed)      # seeded: the same frame dreams the same
 
     def factor(self, path, pose):
@@ -97,25 +127,38 @@ class Dream:
         is not much use when a path is rejected and someone has to find out why.
         """
         if len(path) < 2:
-            return 0.0, {"p_safe": 0.0, "margin": 0.0, "reason": "path too short"}
+            return 0.0, {"p_safe": 0.0, "p_safe_lo": 0.0, "confident": False,
+                         "n": 0, "margin": 0.0, "reason": "path too short"}
 
         length = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
         steps = int(min(TURN_ALLOWANCE_S + HORIZON_SLACK * length / self.max_v,
                         HORIZON_CAP_S) / DT)
 
         survived, stalled, margins = 0, 0, []
-        for _ in range(self.n):
-            ok, min_clear, arrived = self._roll(path, pose, steps)
-            # Not arriving is not the same as arriving safely. A rollout that
-            # was still going when time ran out has not been shown to be safe,
-            # so it does not get counted as if it had.
-            if ok and arrived:
-                survived += 1
-                margins.append(min_clear)
-            elif ok:
-                stalled += 1
 
-        p_safe = survived / self.n
+        def roll(count):
+            nonlocal survived, stalled
+            for _ in range(count):
+                ok, min_clear, arrived = self._roll(path, pose, steps)
+                # Not arriving is not the same as arriving safely. A rollout
+                # that was still going when time ran out has not been shown
+                # to be safe, so it does not get counted as if it had.
+                if ok and arrived:
+                    survived += 1
+                    margins.append(min_clear)
+                elif ok:
+                    stalled += 1
+
+        n = self.n
+        roll(n)
+        # Undecided after the first batch: dream more (see P_SAFE_MIN).
+        if (survived < n and wilson(survived, n)[1] >= P_SAFE_MIN
+                and self.n_max > n):
+            roll(self.n_max - n)
+            n = self.n_max
+
+        p_safe = survived / n
+        p_safe_lo = wilson(survived, n)[0]
         margin = sum(margins) / len(margins) if margins else 0.0
         room = min(max((margin - ROBOT_R) / (ROOMY - ROBOT_R), 0.0), 1.0)
         reason = ""
@@ -123,7 +166,9 @@ class Dream:
             reason = ("never got to the end of it in time" if stalled
                       else "every imagined run hit something")
         return p_safe * (FLOOR + (1 - FLOOR) * room), {
-            "p_safe": p_safe, "margin": margin, "stalled": stalled / self.n,
+            "p_safe": p_safe, "p_safe_lo": p_safe_lo,
+            "confident": survived == n or p_safe_lo >= P_SAFE_MIN,
+            "n": n, "margin": margin, "stalled": stalled / n,
             "reason": reason,
         }
 

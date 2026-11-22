@@ -19,7 +19,8 @@ is the paper's affordance re-ranking, as a filter in front of the dream
 rather than in place of it. What survives is handed to dreaming.py, which rolls
 the dog's own controller forward along it with noise and comes back with a
 safety factor: the probability of getting down it without hitting anything,
-weighted by how much room it left. That factor gates (below GATE, rejected),
+weighted by how much room it left. That factor gates (below GATE, rejected --
+and so does a path the dream cannot show is P_SAFE_MIN safe, see passes()),
 ranks (safest first, progress second) and throttles (the chosen path's factor
 scales the dog's speed, so a tight path is walked slowly rather than briskly).
 """
@@ -37,6 +38,19 @@ DEFAULT_URL = "http://127.0.0.1:8009"
 # The spec's confidence gate. A candidate the dog cannot imagine surviving at
 # least this well is not offered, however much progress it would have made.
 GATE = 0.5
+
+
+def passes(factor, why):
+    """The gate: factor >= GATE, and P(safe) >= P_SAFE_MIN with confidence.
+
+    The factor alone does not bound collision: P(safe) x (0.4 + 0.6 room)
+    lets a roomy path that hits one time in four score 0.525. So the dream's
+    own verdict on P_SAFE_MIN (dreaming.Dream.factor's `confident`, the
+    Wilson lower bound over up to N_DREAMS_MAX rollouts) has to agree too.
+    A `why` without that verdict (a stand-in dream) is judged on the factor.
+    """
+    return factor >= GATE and why.get("confident", True)
+
 # Safety is the first sort key, but not to three decimal places: two paths
 # whose factors differ by a hundredth are equally safe, and progress should
 # decide between them.
@@ -314,7 +328,7 @@ class VamosPolicy:
                 self.verdicts.append((p, None, "pass"))
                 continue
             factor, why = self.dream.factor(p, pose)
-            if factor < GATE:
+            if not passes(factor, why):
                 self.stats["rejected_by_gate"] += 1
                 self.stats["rejected"] += 1
                 self.verdicts.append((p, factor, "gate"))

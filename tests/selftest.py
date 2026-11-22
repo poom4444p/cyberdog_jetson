@@ -326,7 +326,7 @@ def dreaming():
     from cyberdog.sim.robot.mujoco_robot import MujocoRobot
     from cyberdog.sim.scene import levels
     from cyberdog.sim.sensing import dreaming as D
-    from cyberdog.sim.vamos_client import GATE
+    from cyberdog.sim.vamos_client import passes
 
     clear, free = clearance_test(1), free_space_test(1)
     r = MujocoRobot(SCENE, start_xy=(24.0, 9.5), start_yaw=0.0,
@@ -380,14 +380,18 @@ def dreaming():
         "into wall": (line((24, 9.5), (24, 7.0)), (24, 9.5, -math.pi / 2)),
         "stairwell": (line((5, 9.5), (1.0, 9.5)), (5, 9.5, math.pi)),
     }
-    score = {k: D.Dream(clear, r.MAX_V).factor(p, pose)[0]
-             for k, (p, pose) in cases.items()}
+    judged = {k: D.Dream(clear, r.MAX_V).factor(p, pose)
+              for k, (p, pose) in cases.items()}
+    score = {k: f for k, (f, _) in judged.items()}
+    ok = {k: passes(*fw) for k, fw in judged.items()}
     check("corridor scores full", score["corridor"] >= 0.9,
           f"{score['corridor']:.2f} down the middle of a 2.8 m corridor")
     check("doorway passes, below the corridor",
-          GATE <= score["doorway"] < score["corridor"],
-          f"{score['doorway']:.2f} through the room door at x = 9")
-    check("wall hug rejected", score["wall hug"] < GATE,
+          ok["doorway"] and score["doorway"] < score["corridor"],
+          f"{score['doorway']:.2f} through the room door at x = 9, P(safe) "
+          f"{judged['doorway'][1]['p_safe']:.2f} >= {judged['doorway'][1]['p_safe_lo']:.2f} "
+          f"over {judged['doorway'][1]['n']} rollouts")
+    check("wall hug rejected", not ok["wall hug"],
           f"{score['wall hug']:.2f} walking 0.5 m off the south wall")
     check("wall and stairs score zero",
           score["into wall"] == 0.0 and score["stairwell"] == 0.0,
@@ -458,8 +462,8 @@ def dreaming():
     for k, (path, pose) in enumerate(cands):
         f, why = D.Dream(clear, r.MAX_V, seed=k).factor(path, pose)
         rows.append((f, why["p_safe"], driven(path, pose, N_DRIVE),
-                     driven(path, pose, N_DRIVE, noise=1.5)))
-    passed = [t for t in rows if t[0] >= GATE]
+                     driven(path, pose, N_DRIVE, noise=1.5), passes(f, why)))
+    passed = [t for t in rows if t[4]]
     # 30 drives screen, 200 confirm. At 30 a candidate that truly collides
     # 15% of the time reads over 20% about one time in four, and with 128
     # candidates that is a false alarm every run; 200 has a standard error
@@ -475,12 +479,12 @@ def dreaming():
     # the gate lets through on PASS_RATE of them or more is a suspect.
     GATE_SEEDS, PASS_RATE = 50, 0.05
     risky = [k for k, t in enumerate(rows) if 1 - t[2] > 0.2]
-    rate = {k: sum(D.Dream(clear, r.MAX_V, seed=1000 + s).factor(*cands[k])[0] >= GATE
+    rate = {k: sum(passes(*D.Dream(clear, r.MAX_V, seed=1000 + s).factor(*cands[k]))
                    for s in range(GATE_SEEDS)) / GATE_SEEDS for k in risky}
     suspects = [k for k in risky if rate[k] >= PASS_RATE]
     bad = [k for k in suspects if 1 - driven(*cands[k], 200, seed=99) > 0.2]
     bad15 = [t for t in passed if 1 - t[3] > 0.2]
-    missed = [t for t in rows if t[0] < GATE and t[2] == 1.0]
+    missed = [t for t in rows if not t[4] and t[2] == 1.0]
     mae = sum(abs(t[1] - t[2]) for t in rows) / len(rows)
     bias = sum(t[1] - t[2] for t in rows) / len(rows)
     worst = max(rows, key=lambda t: t[1] - t[2])
@@ -508,10 +512,12 @@ def dreaming():
     spread = {}
     for k in ("corridor", "doorway", "near gate", "into wall"):
         p, pose = cases[k]
-        fs = [D.Dream(clear, r.MAX_V, seed=s).factor(p, pose)[0] for s in range(20)]
+        fws = [D.Dream(clear, r.MAX_V, seed=s).factor(p, pose) for s in range(20)]
+        fs = [f for f, _ in fws]
         mean = sum(fs) / len(fs)
         sd = (sum((f - mean) ** 2 for f in fs) / len(fs)) ** 0.5
-        flips = min(sum(f >= GATE for f in fs), sum(f < GATE for f in fs))
+        n_pass = sum(passes(*fw) for fw in fws)
+        flips = min(n_pass, len(fws) - n_pass)
         spread[k] = (mean, sd, flips)
     steady = [k for k in ("corridor", "into wall") if spread[k][2]]
     check("clear-cut paths never flip", not steady,
@@ -723,7 +729,7 @@ def vamos():
           f"verdict {verdict['through']}")
     scrape_f = next((f for p, f, v in policy.verdicts if v == "gate"), None)
     check("scraping a wall: rejected by the gate", verdict["scrape"] == "gate",
-          f"verdict {verdict['scrape']}" + (f", factor {scrape_f:.2f} < {GATE}"
+          f"verdict {verdict['scrape']}" + (f", factor {scrape_f:.2f}"
                                             if scrape_f is not None else ""))
     check("clear path chosen", chosen is not None and abs(chosen[-1][1] - 9.5) < 0.2
           and safety >= GATE,
