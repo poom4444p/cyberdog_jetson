@@ -24,7 +24,8 @@ with noise on heading bias, speed and slip, returning
 
     safety = P(no collision) x (room left)
 
-and it gates (`GATE = 0.5`, `vamos_client.py`), ranks and throttles VAMOS
+and it gates (`passes()` in `vamos_client.py`: `GATE = 0.5` on the factor, and
+P(safe) ≥ `P_SAFE_MIN` = 0.8 on a 95% lower bound), ranks and throttles VAMOS
 candidates. Nothing is trained, so nothing can overfit or drift — which is why
 two of their gates do not apply yet:
 
@@ -72,8 +73,8 @@ Where: `python tests/selftest.py dreaming`. Status column is today's.
 | ID | Case | Threshold | Status |
 |---|---|---|---|
 | B1 | Down the middle of the corridor | factor ≥ 0.9 | ✅ checked |
-| B2 | Through the room door at x = 9 | `GATE ≤ factor < corridor` | ✅ checked |
-| B3 | 0.5 m off the south wall | factor < `GATE` | ✅ checked |
+| B2 | Through the room door at x = 9 | passes the gate, factor < corridor | ✅ checked |
+| B3 | 0.5 m off the south wall | refused by the gate | ✅ checked |
 | B4 | Into a wall / into the stairwell | factor **= 0.00** exactly | ✅ checked |
 | B5 | **Stopping lowers risk**: a risky path cut off half-way vs the whole of it, same seed | mean factor advantage **≥ 0.005** | ✅ checked |
 | B6 | **Stopping never raises collision**: P(safe) of the half path minus the whole | mean **≥ 0** (per path is binomial noise at 24 rollouts) | ✅ checked |
@@ -90,7 +91,7 @@ dreamed, then driven on the twin with the live loop's `MAX_V` / `MAX_W`.
 |---|---|---|---|
 | B7 | Candidates measured | **≥ 128** | ✅ checked |
 | B8 | Hazard candidates (line passes closer than `ROOMY` = 0.40 to a wall, door jamb or the stairwell, in clearance-field units) | **≥ 32** | ✅ checked |
-| B9 | **False passes**: candidates the gate passes on ≥ 5% of 50 dream seeds whose driven P(collision) > 0.2 — screened at 30 drives, confirmed at 200 | **0** | ❌ **3** (2026-11-21, see below) |
+| B9 | **False passes**: candidates the gate passes on ≥ 5% of 50 dream seeds whose driven P(collision) > 0.2 — screened at 30 drives, confirmed at 200 | **0** | ✅ **0** (2026-11-22, P(safe) gate; was 3, see below) |
 | B10 | Calibration: mean \|dreamed P(safe) − driven P(safe)\| | **≤ 0.10** | ✅ checked |
 | B11 | Stress: false passes with the twin's noise ×1.5 | report only | ✅ printed |
 | B12 | Rejected though every drive was clean | report only (by design in tight rooms) | ✅ printed |
@@ -120,9 +121,25 @@ driven). The gate formula lets them through: factor = P(safe) × (FLOOR +
 still scores over `GATE` = 0.5 (0.75 × (0.4 + 0.6 × 0.5) = 0.525). B9 asks for
 P(collision) ≤ 0.2 on every pass, which `factor ≥ GATE` alone does not
 guarantee. A "collision" here is clearance under `ROBOT_R` in the inflated
-field, i.e. inside the safety margin, not the body touching the jamb. Open:
-gate on P(safe) as well as on the factor; that changes how VAMOS steers and
-needs Gate D again.
+field, i.e. inside the safety margin, not the body touching the jamb.
+
+**Fixed: the gate asks for P(safe) too (2026-11-22).** A plain
+`p_safe ≥ 0.8` would not have done it: at 24 rollouts that is 20/24, which the
+x = 15 crossing (dreamed 0.79) reaches by luck about 41% of the time. So
+`Dream.factor` now judges P(safe) ≥ `P_SAFE_MIN` = 0.8 on a one-sided 95%
+Wilson lower bound, sequentially: after `N_DREAMS` = 24 rollouts a path is
+passed if all 24 survived, refused if even the upper bound is under 0.8, and
+otherwise dreamed up to `N_DREAMS_MAX` = 96 and judged on the lower bound
+(84/96). The early pass is all-or-nothing because 23/24 by luck is the false
+pass being stopped. `vamos_client.passes()` = factor ≥ `GATE` and that
+verdict; selftest uses the same function. Selftest dreaming, 3:13 on the Mac:
+B9 0 (12 collide in the screen, 2 suspects, both ≤ 0.2 at 200 drives), B10
+0.02, B12 0 of 10, the x = 9 door still passes (P(safe) 0.97, bound 0.92 over
+96), B17 6.3 ms. Costs: a borderline candidate takes ~22 ms more (Mac); B17's
+five are not borderline, so a frame with two or more of them can still miss
+the 50 ms tick, more so on the J4012. And a path whose true P(safe) is 0.9
+passes about 84% of the time, so VAMOS may answer `none` more often: Gate D
+again before trusting the D results.
 
 ### B.3 Stability and sanity
 
