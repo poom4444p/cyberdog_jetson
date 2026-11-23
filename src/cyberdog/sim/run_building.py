@@ -1876,7 +1876,9 @@ class Run:
         462 ms at worst, against a 50 ms tick (HIL 11-23 11:17, room 201 P6),
         so the brain stood still for up to nine ticks each time an answer
         landed. Here it costs the loop nothing but the GIL it shares. The pose
-        it judges from is at most one tick old, as the old one was.
+        it judges from was at most one tick old when the dream began; by the
+        time the loop takes the answer it is that plus the dream (~90-370 ms
+        on the J4012, HIL 11-23) plus up to a tick.
         """
         paths = policy.request(image, prompt, cam_pose)
         now = self.vlm_now

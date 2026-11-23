@@ -114,6 +114,10 @@ it prints the branch and commit and asks before copying (`SYNC_YES=1` when
 there is no terminal). The brain and go2_board used to be two repos synced
 separately, and a sync from a checkout without the board fixes once put an old
 board on the J4012, which only a fall showed; one repo means one commit for both.
+The board has no `.git`, so `sync` also writes `~/cyberdog_jetson/VERSION`
+(branch, commit, uncommitted count, time); `onboard.sh` prints it as `code:`
+in the board log, the brain log and `status`. Files deleted from the repo are
+not deleted on the board (no `--delete`).
 
 - **`walk`** (about a minute): the board stands, walks 4 s at 0.54 m/s and
   0.47 rad/s, and stands again, driven by go2_board's `brain_cli.py`, no brain.
@@ -128,6 +132,13 @@ board on the J4012, which only a fall showed; one repo means one commit for both
   (`DENSE=1`, ~20k points a sweep, a real unit's rate; `DENSE=0` for the old
   ~2k pattern): on the sparse one the odometry drifted 1.02 m against 0.26 m. Three lio routes before the switch (11-11,
   11-12, 0 and 4 people) all arrived, at most 0.37 m off the truth.
+  Not all real: the odometry is anchored to the world's true pose at the start
+  and again after every floor change (`odometry.PoseAnchor`), and the height
+  that ends a lift ride is the world's (`BoardTwinRobot.ride_lift`).
+  VAMOS steers (`VAMOS_MODE=steer`, the default; `shadow` measures only).
+  It ends `RESULT: PASS` (exit 0) only if the brain ARRIVED and the world
+  truth has no COLLISIONS and no CONTACT; otherwise `RESULT: FAIL (why)`,
+  exit 1. A missing world-truth line is a fail.
 
 Both end with what `dds_gaps.py` saw on the board's side of the link:
 
@@ -163,10 +174,11 @@ on the board's pose.
 
 ## Settings worth knowing
 
-- **`STALE_MS`** (`onboard.sh`, default 200): the board goes limp after this long
-  without a state. The Mac's world now and then pauses for 100 ms and more, so
-  the rig uses 200. go2_board's own limit is 50 ms (`safety.STALE_S`); set
-  `STALE_MS=` (empty) to use it. Anything driving real motors must.
+- **`STALE_MS`**: the board goes limp after this long without a state.
+  `onboard.sh` defaults to go2_board's own 50 ms (`safety.STALE_S`), the limit
+  for real motors; `run_hil.sh` passes 200 (its own default), because the Mac's
+  world now and then pauses for 100 ms and more. Started by hand against the
+  Mac's world, give `STALE_MS=200` yourself.
 - **`WORLD_ARGS=--held-pd`**: go2_world's motors as unitree_mujoco has them (the
   torque worked out once per command and held) instead of every physics step.
 - **Cores**: `BOARD_CORES` (6,7) and `BRAIN_CORES` (0-5) in `onboard.sh`.

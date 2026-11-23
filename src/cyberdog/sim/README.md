@@ -625,8 +625,8 @@ it gives the camera, the LiDAR and the checks their view. Floor 1 only.
 ```bash
 python ~/Work/unitree/go2_world/scripts/run_world.py --headless    # unitree_sim env
 python ~/Work/unitree/go2_world/scripts/run_lidar.py                # once the world is up
-python ~/Work/unitree/go2_board/scripts/board_main.py --stale-ms 200 \
-    --policy ~/Work/unitree/go2_board/policies/go2_flat_v5
+python go2_board/scripts/board_main.py --stale-ms 200 \
+    --policy go2_board/policies/go2_flat_v5                         # from this repo's root
 cd vendor/VAMOS/server && bash start_server.sh                      # vamos_mac env
 python -m cyberdog.sim.run_building "room 101" --robot go2_board --no-video --vamos
 ```

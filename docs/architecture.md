@@ -47,13 +47,14 @@ built against, see [`spec.md`](spec.md).
   |                                the person on the handle      |
   |                                into something                |
   |                                                              |
-  |   every 20 ticks (1 Hz), if --vamos:                         |
+  |   back to back, one call at a time, if --vamos:              |
   |     checkpoint_projector.project_route()  -> goal PIXEL      |
-  |     vamos_client.plan()     -> 5 candidate paths -> 1        |
+  |     vamos_client.request()  -> 5 candidate paths             |
+  |     vamos_client.deliver()  -> 1, judged from the pose now:  |
   |       |- traversable()      cheap geometry test              |
   |       \- dreaming.factor()  imagined rollouts -> safety      |
-  |     (asynchronous: the answer lands --vlm-latency s later,   |
-  |      and is re-dreamed from where the dog is by then)        |
+  |     (twin: the answer lands --vlm-latency s later, judged on |
+  |      that tick; board: asked AND judged on a worker thread)  |
   +-------------------------------------------------------------+
               |  target point
               v
@@ -89,11 +90,17 @@ deterministic filters before it can steer:
 | Filter | Question | Where |
 |---|---|---|
 | `traversable()` | Does the drawn line itself stay in free space? | `vamos_client.py` |
-| `Dream.factor()` | If we actually chased it with our own controller, 24 times, with noise — how often do we survive, and with how much room? | `sensing/dreaming.py` |
+| `Dream.factor()` | If we actually chased it with our own controller, 24 to 96 times, with noise — how often do we survive, and with how much room? | `sensing/dreaming.py` |
 
-The second returns `P(no collision) × (room left)`. Below `GATE = 0.5` the
-candidate is rejected; above it, the factor also **throttles speed**, so a path
-the dog only just believes it can walk is walked at half pace.
+The second returns `P(no collision) × (room left)`. A candidate passes
+(`vamos_client.passes`) only if that factor is at least `GATE = 0.5` **and**
+P(no collision) is at least `P_SAFE_MIN = 0.8` on a one-sided 95% Wilson lower
+bound (24 rollouts, up to 96 when undecided). That is P(collision) <= 0.2,
+looser than the spec's chance constraint (P_coll < 0.01): a known deviation.
+The dream's noise is heading bias, speed and slip; it has no position error
+(LIO vs truth reached 0.48-0.58 m in HIL) and nobody moves in it. Above the
+gate, the factor also **throttles speed**, so a path the dog only just
+believes it can walk is walked at half pace.
 
 `dreaming.py` imports its gains from `sim/control.py` — the same constants the
 live loop uses. A dream of a controller the dog does not have would tell us
@@ -229,8 +236,15 @@ path, HIL 11-19 median; 0.4 m to stop; 0.81 m/s, i.e. ~`MAX_V`, at L = 1.8 s, me
 slowest of the last few answers. (Until 11-19 this used `VLM_SEE_D` = 2.0 m, a guess at
 how far the camera sees a flat puddle: 0.44 m/s at 1.8 s, Gate D D6 failed on every route.)
 
-On the HIL rig VAMOS runs in shadow by default (`VAMOS_MODE=shadow` in
-`scripts/hil/onboard.sh` / `run_hil.sh`; `steer` is `--vamos` as above). It is
+`VLM_REACH_D` is a pace, not a safety bound: it is the median reach, so about
+half of VAMOS's chosen paths are shorter (p10 1.4 m). What keeps the dog off
+things past the end of a short path is the LiDAR (perception, the board's
+guard) and the map route, not this cap.
+
+On the HIL rig VAMOS steers by default (`VAMOS_MODE=steer` in
+`scripts/hil/onboard.sh` / `run_hil.sh`: the full pipeline, `--vamos` as
+above). `VAMOS_MODE=shadow` is measurement only, the rig's default until
+11-23. In shadow VAMOS is
 asked back to back as under `--vamos` and every answer is logged
 (`output/shadow_log.jsonl`, copied to the run's folder), but the map route,
 LiDAR and CE-RRT\* drive and there is no VLM speed cap, so the dog walks at up
@@ -242,6 +256,10 @@ see is untested (`VLM_SEE_D` is a guess). The cost: in shadow nothing watches
 for flat hazards the LiDAR cannot see -- the same as map-only. A fast floor
 check is what would let the dog walk at pace with that covered; until then,
 shadow is for the rig, not for walking with people.
+
+HISTORY, outside the current scope (MAP, CONTROL, VAMOS only; no extra model
+on the dog): the floor guard and puddles below are kept in the code, but are
+not used for results.
 
 The floor guard (`src/cyberdog/sim/sensing/floor_guard.py`, `--floor-guard sim`)
 is that fast floor check, simulated: the twin has no water, so `--puddles N`

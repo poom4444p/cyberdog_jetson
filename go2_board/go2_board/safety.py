@@ -6,7 +6,9 @@ Every command passes through Safety.filter() on its way to the bus. It goes
 to damping, and stays there until reset(), when:
   - the state is stale: no LowState for STALE_S, so the board is blind;
   - the body has tipped past TILT_MAX: it has fallen, or is falling;
-  - the controller failed (raised, or returned nothing) this tick.
+  - the controller failed (raised, or returned nothing) this tick;
+  - the state or the command holds a NaN or an inf: np.clip passes a NaN
+    through, so without this check it would go to the motors as a target.
 Otherwise it clips each target inside the joint's range and lowers it until
 the torque the driver will compute stays inside the motor's peak; where the
 two disagree (a joint running fast at a stop), the range wins.
@@ -29,6 +31,11 @@ def tilt(quat):
     return math.acos(max(-1.0, min(1.0, up_z)))
 
 
+def finite(*arrays):
+    """True when every number in every array is finite (no NaN, no inf)."""
+    return all(np.all(np.isfinite(a)) for a in arrays)
+
+
 class Safety:
     def __init__(self, stale_s=STALE_S):
         self.tripped = None       # why it went to damping, or None
@@ -46,10 +53,14 @@ class Safety:
         if self.tripped is None:
             if now - state.stamp > self.stale_s:
                 self.tripped = f"stale state ({(now - state.stamp) * 1e3:.0f} ms old)"
+            elif not finite(state.q, state.dq, state.quat):
+                self.tripped = "state not finite"
             elif tilt(state.quat) > TILT_MAX:
                 self.tripped = f"tilted {math.degrees(tilt(state.quat)):.0f} deg"
             elif cmd is None:
                 self.tripped = "controller failed"
+            elif not finite(cmd.q, cmd.dq, cmd.kp, cmd.kd, cmd.tau):
+                self.tripped = "command not finite"
         if self.tripped is not None:
             return MotorCmd.damping(state.q)
         return self.limit(cmd, state)

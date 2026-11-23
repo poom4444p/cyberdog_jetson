@@ -12,7 +12,8 @@ dist/
 .DS_Store
 .idea/
 
-# --- generated output: nothing here is an input to anything -----------------
+# --- generated output: runs, videos, the built scene (output/scene_cache IS an
+# input: run_building reads it; rebuilt per machine, copied to the board by hand)
 # Built MuJoCo scenes and recorded videos (rebuild: python -m cyberdog.sim.scene.build_scene --building)
 output/
 MUJOCO_LOG.TXT

@@ -152,8 +152,13 @@ because the real-world robot needs it, and the map route stays the fallback
 whenever no VAMOS path passes the safety gate. When there are people, they
 behave as an aware crowd that makes room for the dog (`--crowd aware`), and
 the dog goes round them with CE-RRT\* instead of waiting (`--planner cerrt`).
-This is the configuration Gate D passed on (`docs/dreaming_safety_kpis.md`,
-2026-10-14 and 2026-10-20), in simulation, with base VAMOS.
+Gate D does **not** run exactly this: its default is `--planner map` in both
+arms (with CE-RRT\* in both, one reshuffled encounter fails D3), 3 people, and
+a twin that pauses physics while VAMOS answers (`--vlm-latency 1.8`, dreams on
+the tick). The latest pass, 2026-11-23 (`output/gate_d/20261123-092451`,
+merged_L), was on that set-up: it judges VAMOS's decisions, not CE-RRT\* or
+the J4012's timing. Those come from the HIL rig (`scripts/hil/`), which runs
+this release configuration on the board.
 
 VAMOS needs its server (step 6). Without one, the run stops at once with
 `FAILED BY vamos: server is not answering`; start the server, or add

@@ -12,7 +12,9 @@
 # Each run writes its logs to $OUT (output/hil/<time>-<what>) and ends with a
 # summary: the brain's outcome, how regularly states and commands moved, and
 # a route's truth from the world ("world truth:": collisions and people, on the
-# physics itself; go2_world/score.py).
+# physics itself; go2_world/score.py). A route passes (exit 0, "RESULT: PASS")
+# only if the brain ARRIVED and the world truth has no COLLISIONS and no
+# CONTACT; a missing truth line is a fail, not a pass.
 # The world, the LiDAR and the board are stopped at the end, or on Ctrl-C;
 # VAMOS is left up (it takes ~25 s to load): `onboard.sh stop all` there stops it.
 #
@@ -35,9 +37,12 @@
 #   RECORD=1     go2_world records the run to $OUT/world.mp4 (offscreen, chase camera;
 #                needs go2_world's [record] extra in PY's environment)
 #   TRACE=1      the brain prints its commands
-#   VAMOS_MODE   route: shadow (default: VAMOS logged, the map drives, no VLM speed
-#                cap; its log copied to $OUT/shadow_log.jsonl) or steer (VAMOS steers,
-#                pace capped by its latency). See onboard.sh.
+#   VAMOS_MODE   route: steer (default, the full pipeline: VAMOS steers, pace capped
+#                by its latency) or shadow (measurement only: VAMOS logged, the map
+#                drives, no VLM speed cap; its log copied to $OUT/shadow_log.jsonl).
+#                See onboard.sh.
+#   STALE_MS     the board goes limp after this long without a state (200: the Mac's
+#                world pauses now and then; board_main's own 50 ms is for real motors)
 #   VAMOS_MODEL  the model VAMOS loads on the board when it starts (onboard.sh's
 #                default: the base), an absolute path on the board, e.g.
 #                /home/jittarin/cyberdog_jetson/models/vamos_L_merged; a
@@ -87,7 +92,8 @@ RECORD=${RECORD:-0}
 TRACE=${TRACE:-0}
 CAMERA=${CAMERA:-1}
 TRACK_LOG=${TRACK_LOG:-0}
-VAMOS_MODE=${VAMOS_MODE:-shadow}
+VAMOS_MODE=${VAMOS_MODE:-steer}
+STALE_MS=${STALE_MS:-200}          # the world here is a simulator (onboard.sh's default is 50)
 VAMOS_STEER=${VAMOS_STEER:-}
 CLOUD_LOG=${CLOUD_LOG:-0}
 FRAME_LOG=${FRAME_LOG:-0}
@@ -196,7 +202,13 @@ case "${1:-}" in
         --exclude /models --exclude /output --exclude /datasets \
         --include '/vendor/VAMOS/server/***' --exclude '/vendor/VAMOS/*' \
         --exclude '*.docx' --exclude '*.pptx' --exclude /vamos_train.tgz \
-        "$CYBERDOG/" "$BOARD:~/$REMOTE/" && echo "$(basename "$CYBERDOG") -> $BOARD:~/$REMOTE" ;;
+        "$CYBERDOG/" "$BOARD:~/$REMOTE/" || { echo "not synced: rsync failed"; exit 1; }
+    # The board has no .git: say there which commit it got, for onboard.sh to print.
+    version="$(git -C "$CYBERDOG" branch --show-current) $(git -C "$CYBERDOG" log -1 --format='%h')"
+    version+="$([ "$dirty" != 0 ] && echo " +$dirty uncommitted"), synced $(date -u '+%Y-%m-%d %H:%M UTC')"
+    printf '%s\n' "$version" | on_board "cat > ~/$REMOTE/VERSION" \
+        || { echo "synced, but VERSION not written"; exit 1; }
+    echo "$(basename "$CYBERDOG") -> $BOARD:~/$REMOTE ($version)" ;;
 
   clock)
     # A sudo password prompt needs a terminal: run this one yourself, not from a script.
@@ -215,7 +227,7 @@ case "${1:-}" in
     new_out walk; check_clock
     trap stop_all EXIT
     start_world
-    on_board "$ONBOARD board" | tail -1
+    on_board "STALE_MS=$STALE_MS $ONBOARD board" | tail -1
     start_gaps
     on_board "cd ~/$REMOTE/go2_board && $BOARD_PY -u scripts/brain_cli.py stand:4 walk:4:0.54,0,0.47 stand:2" \
         > "$OUT/brain_cli.log" 2>&1
@@ -248,15 +260,15 @@ case "${1:-}" in
     start_world
     on_board "${VAMOS_MODEL:+VAMOS_MODEL=$(printf %q "$VAMOS_MODEL") }$ONBOARD vamos"
     if [ "$LIO_RECORD" = 1 ]; then
-        on_board "rm -rf ~/$LIO_DIR; POSE=$POSE LIO_RECORD=~/$LIO_DIR $ONBOARD board" | tail -2
+        on_board "rm -rf ~/$LIO_DIR; POSE=$POSE STALE_MS=$STALE_MS LIO_RECORD=~/$LIO_DIR $ONBOARD board" | tail -2
     else
-        on_board "POSE=$POSE $ONBOARD board" | tail -1
+        on_board "POSE=$POSE STALE_MS=$STALE_MS $ONBOARD board" | tail -1
     fi
     start_gaps
     brain_args=${BRAIN_ARGS:-}
     for p in $PUDDLES; do brain_args+=" --puddle-at $p"; done
     on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE CAMERA=$CAMERA TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG FRAME_LOG=$FRAME_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
-    grep -E "VAMOS_MODE|^camera:|\[camera\]|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
+    grep -E "^code:|VAMOS_MODE|^camera:|\[camera\]|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps
     # The board first (it prints the odometry's error and how it stopped on its
@@ -291,11 +303,22 @@ case "${1:-}" in
             && echo "lio: $OUT/lio ($(ls "$OUT/lio" | grep -c chunk_) chunks, $(du -sh "$OUT/lio" | cut -f1))" \
             || echo "lio: not copied"
     fi
-    grep -q "^ARRIVED" "$OUT/brain.log" ;;
+    # Arriving is not passing: the world's truth must say no collision and no
+    # contact, and must be there at all.
+    why=()
+    grep -q "^ARRIVED" "$OUT/brain.log" || why+=("did not arrive")
+    grep -qE "^world truth: (collisions: none|COLLISIONS:)" "$OUT/world.log" \
+        || why+=("no world truth for collisions")
+    grep -qE "^world truth: (contact: none|CONTACT:)" "$OUT/world.log" \
+        || why+=("no world truth for people")
+    grep -q "^world truth: COLLISIONS:" "$OUT/world.log" && why+=("collision")
+    grep -q "^world truth: CONTACT:" "$OUT/world.log" && why+=("contact with a person")
+    if [ ${#why[@]} -eq 0 ]; then echo "RESULT: PASS"; exit 0; fi
+    (IFS=,; echo "RESULT: FAIL (${why[*]})"); exit 1 ;;
 
   stop)
     stop_all; echo "stopped (VAMOS left up)" ;;
 
   *)
-    sed -n '2,28p' "$0"; exit 2 ;;
+    sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 2 ;;
 esac

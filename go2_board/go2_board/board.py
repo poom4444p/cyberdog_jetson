@@ -68,6 +68,6 @@ class Board:
             return
         end = self.clock() + seconds
         while self.clock() < end:
-            state = self.bus.read()
+            state = self.bus.read() or state     # a missed read: damp from the last one
             self.bus.write(MotorCmd.damping(state.q))
             self.sleep(self.dt)
