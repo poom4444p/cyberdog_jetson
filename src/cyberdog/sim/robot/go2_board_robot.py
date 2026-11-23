@@ -85,6 +85,9 @@ class Go2BoardRobot(RobotInterface):
         self.clock, self.sleep = clock, sleep
         self._t0 = clock()
         self._next = self._t0 + self.CONTROL_DT
+        # The brain's own ticks: how many it handed over after the 20 Hz
+        # deadline had passed, and the worst by how much (step).
+        self.ticks, self.late, self.late_ms_max = 0, 0, 0.0
         self._cmd = (0.0, 0.0, 0.0)
         self._state, self._got = None, None
         # (board clock, map x, y, yaw) of recent states: a cloud is placed
@@ -162,11 +165,19 @@ class Go2BoardRobot(RobotInterface):
         """Send this tick's command, then wait for the next 20 Hz tick."""
         self.link.send(*self._cmd, mode="walk")
         wait = self._next - self.clock()
+        self.ticks += 1
         if wait > 0:
             self.sleep(wait)
             self._next += self.CONTROL_DT
         else:
+            self.late += 1
+            self.late_ms_max = max(self.late_ms_max, -wait * 1000.0)
             self._next = self.clock() + self.CONTROL_DT
+
+    def tick_summary(self):
+        """One line on the brain's ticks against the 20 Hz deadline."""
+        return (f"BRAIN TICK: {self.late} of {self.ticks} ticks late, worst "
+                f"{self.late_ms_max:.0f} ms past the {self.CONTROL_DT * 1000:.0f} ms deadline")
 
     def request(self, mode, until=None, timeout=5.0):
         """Ask the board for a mode ("stand", "lie", "limp") at 20 Hz, with

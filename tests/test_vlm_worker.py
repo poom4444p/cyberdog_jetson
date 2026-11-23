@@ -19,7 +19,10 @@ class SlowVamos:
         return [[(1.0, 2.0), (3.0, 4.0)]]
 
     def deliver(self, paths, pose, destination):
+        self.delivered = (pose, destination)
         return paths[0], paths, 0.9
+
+    delivered = None
 
 
 class Robot:
@@ -47,8 +50,10 @@ def stub():
                                 pending=None, vlm_latency=None, policy=lambda floor: vamos,
                                 vlm={"asked": 0, "answers": 0, "dropped": 0, "age": 0.0,
                                      "moved": 0.0, "cap_min": None},
-                                vamos_steer=None, vlm_asked_t=None, vlm_lat=[])
-    for name in ("ask_vamos", "take_answer", "vlm_busy", "vlm_speed_cap"):
+                                vamos_steer=None, vlm_asked_t=None, vlm_lat=[],
+                                vlm_gen=0, vlm_now=((0.0, 0.0, 0.0), (5.0, 5.0)))
+    for name in ("ask_vamos", "ask_and_judge", "take_answer", "vlm_busy",
+                 "vlm_speed_cap"):
         setattr(run, name, getattr(rb.Run, name).__get__(run))
     return run, vamos
 
@@ -73,9 +78,11 @@ def test_a_dropped_answer_still_holds_the_worker():
     run.ask_vamos(1, 0, {"state": "TRACK", "loc": (500, 600), "destination": (5.0, 5.0)})
     assert vamos.started.wait(1.0)
     run.pending = None                          # the leg ended: answer dropped
+    run.vlm_gen += 1                            # (as Run.follow does)
     assert run.vlm_busy()                       # but the GPU is still on it
     vamos.go.set()
-    run.vlm_worker.result(timeout=1.0)
+    assert run.vlm_worker.result(timeout=1.0) is None
+    assert vamos.delivered is None              # nothing judged for an ended leg
     assert not run.vlm_busy()
     run.vlm_pool.shutdown()
 

@@ -42,6 +42,9 @@ class Recorder:
         self.prompts.append(prompt)
         return []
 
+    def deliver(self, paths, pose, destination):   # the board's worker judges too
+        return None, [], 0.0
+
 
 @pytest.mark.parametrize("real_time", [True, False])
 def test_ask_vamos_sends_the_preference(real_time):
