@@ -1343,6 +1343,27 @@ class HandleStop(HazardStop):
     layer = "handle"
 
 
+class _Nothing:
+    """Stands in for BrainTicks where there is none (the twin): does nothing."""
+
+    def tag(self, name):
+        pass
+
+    def mark(self, name, ms):
+        pass
+
+    def begin(self, name):
+        pass
+
+    def end(self, name):
+        pass
+
+
+def tick_log(robot):
+    """The board's per-tick log (go2_board_robot.BrainTicks), or a no-op."""
+    return getattr(getattr(robot, "board", None), "tick_log", None) or _Nothing()
+
+
 class Run:
     """One drive through the building, with the video panels attached."""
 
@@ -1862,7 +1883,12 @@ class Run:
         if gen != self.vlm_gen or now is None:
             return None
         pose, destination = now
-        return policy.deliver(paths, pose, destination)
+        log = tick_log(self.robot)
+        log.begin("dream")          # the ticks it overlaps are tagged "dream"
+        try:
+            return policy.deliver(paths, pose, destination)
+        finally:
+            log.end("dream")
 
     def vlm_speed_cap(self):
         """Fastest the dog may walk on VAMOS's word, m/s: see VLM_REACH_D.
@@ -2891,6 +2917,9 @@ class Run:
             if new is None:
                 self.plan_speed = (self.plan_speed + 1) % len(ce_rrt.SPEEDS)
             ms = (time.perf_counter() - t0) * 1000
+            log = tick_log(self.robot)
+            log.tag("plan")
+            log.mark("plan", ms)
             self.plans["ms"] += ms
             self.plans["worst_ms"] = max(self.plans["worst_ms"], ms)
             self.plan_at = self.searched_at = n
@@ -3243,6 +3272,8 @@ class Run:
             live = self.clearance(floor)
             if getattr(self.robot, "map_fix", None) is not None:
                 self.robot.map_fix.use(live)     # the board's pose onto this floor's map
+            tlog = tick_log(self.robot)         # what this tick spends, on the board
+            t_scan = time.perf_counter()
             scan = self.robot.get_scan()
             scan_xyz = np.asarray(scan).reshape(-1, 3)
             blind = blind_ahead(scan_xyz, (x, y, yaw))
@@ -3271,6 +3302,7 @@ class Run:
             # since last tick. A crate answers "none of me".
             tracks = self.tracker.update(live.points)
             walking = self.tracker.movers()
+            tlog.mark("scan", (time.perf_counter() - t_scan) * 1000)
             # Somebody slower ahead in the lane: followed, or overtaken on the
             # left (see FOLLOW_GAP). Asked before anything plans round them:
             # somebody walking 0.4-0.5 m/s is under MOVING_V most ticks, and
@@ -3490,7 +3522,10 @@ class Run:
             self.vlm_now = ((x, y, yaw), state.get("destination") or waypoints[-1])
             if ((self.vamos or self.shadow) and state["state"] == "TRACK"
                     and self.pending is None and not self.vlm_busy()):
+                t_ask = time.perf_counter()
                 self.ask_vamos(floor, n, state)
+                tlog.tag("ask")
+                tlog.mark("ask", (time.perf_counter() - t_ask) * 1000)
             answer = self.take_answer(floor, n, *self.vlm_now)
             asked = answer is not None
             if asked:
@@ -3498,7 +3533,9 @@ class Run:
             if self.vamos:
                 chosen = proposed
 
+            t_frame = time.perf_counter()
             self.frame(state, proposed, candidates, safety if proposed else None)
+            tlog.mark("frame", (time.perf_counter() - t_frame) * 1000)
             if self.autolabel is not None:
                 self.autolabel.tick(n, (x, y, yaw), self.robot.camera_pose(), state,
                                     self.robot.get_image)

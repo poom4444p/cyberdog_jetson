@@ -28,6 +28,108 @@ from cyberdog.sim.robot.robot_interface import RobotInterface
 STATE_STALE_S = 0.2       # the board reports at 50 Hz: 10 missed reports
 
 
+class BrainTicks:
+    """The brain's ticks against the 20 Hz deadline, and what ran on each.
+
+    HIL 11-23 12:02 (room 201 P6) counted 425 of 3253 ticks late, the worst
+    10.2 s: a count that could not say why. The worst was no tick at all --
+    the brain stood at the start and rode the lift through request(), never
+    step(), and the first step after came seconds "late". Those are gaps
+    now, counted apart. For the rest, each tick keeps how late it was, how
+    long the brain worked on it (from the last step's return to this step),
+    the ms of what the loop marked (mark: "scan", "plan", "frame", ...) and
+    its tags: a CE-RRT* search on this tick (tag), or the VAMOS worker
+    dreaming at any time during it (begin/end, from the worker's thread).
+    """
+
+    BINS = (10, 25, 50, 100, 250)         # ms past the deadline: histogram edges
+
+    def __init__(self, dt):
+        self.dt = dt
+        self.ticks = self.late = self.gaps = 0
+        self.late_ms_max = self.gap_s_max = 0.0
+        self.rows = []                    # (late ms, work ms or None, tags, marks)
+        self._lock = threading.Lock()
+        self._active = collections.Counter()   # begun, not yet ended (any thread)
+        self._seen = set()                     # begun at any time this tick
+        self._tags, self._marks = set(), {}
+
+    def begin(self, name):
+        with self._lock:
+            self._active[name] += 1
+            self._seen.add(name)
+
+    def end(self, name):
+        with self._lock:
+            self._active[name] -= 1
+            if self._active[name] <= 0:
+                del self._active[name]
+
+    def tag(self, name):
+        self._tags.add(name)
+
+    def mark(self, name, ms):
+        self._marks[name] = self._marks.get(name, 0.0) + ms
+
+    def gap(self, s):
+        """A stretch the brain did not tick (standing, the lift): not late."""
+        self.gaps += 1
+        self.gap_s_max = max(self.gap_s_max, s)
+        self._take()
+
+    def tick(self, late_ms, work_ms):
+        """One step(): late_ms > 0 past the deadline, else on time."""
+        self.ticks += 1
+        if late_ms > 0:
+            self.late += 1
+            self.late_ms_max = max(self.late_ms_max, late_ms)
+        tags, marks = self._take()
+        self.rows.append((max(late_ms, 0.0), work_ms, tags, marks))
+
+    def _take(self):
+        with self._lock:
+            tags = frozenset(self._tags | self._seen)
+            self._seen = set(self._active)
+        marks, self._tags, self._marks = self._marks, set(), {}
+        return tags, marks
+
+    def summary(self):
+        """Lines for the end of a run: the count, then the breakdown."""
+        dl = self.dt * 1000
+        out = [f"BRAIN TICK: {self.late} of {self.ticks} ticks late, worst "
+               f"{self.late_ms_max:.0f} ms past the {dl:.0f} ms deadline"
+               + (f"; {self.gaps} gaps not counted (start, lift rides), longest "
+                  f"{self.gap_s_max:.1f} s" if self.gaps else "")]
+        late = [r for r in self.rows if r[0] > 0]
+        if not late:
+            return out
+        edges = (0,) + self.BINS + (float("inf"),)
+        counts = [sum(a < r[0] <= b for r in late) for a, b in zip(edges, edges[1:])]
+        names = [f"{a}-{b}" for a, b in zip(edges, edges[1:-1])] + [f">{self.BINS[-1]}"]
+        out.append("  late by (ms): " + ", ".join(f"{k} {c}" for k, c in zip(names, counts)))
+        groups = collections.defaultdict(list)
+        for r in self.rows:
+            groups["+".join(sorted(r[2])) or "nothing"].append(r)
+        for g in sorted(groups, key=lambda g: (-len(groups[g]), g)):
+            rows = groups[g]
+            lt = [r[0] for r in rows if r[0] > 0]
+            work = [r[1] for r in rows if r[1] is not None]
+            out.append(f"  {g}: {len(lt)} of {len(rows)} late"
+                       + (f" (mean {np.mean(lt):.0f}, worst {max(lt):.0f} ms)" if lt else "")
+                       + (f", work mean {np.mean(work):.1f} / worst {max(work):.0f} ms"
+                          if work else ""))
+        on = [r for r in self.rows if r[0] == 0]
+        keys = sorted({k for r in self.rows for k in r[3]})
+        for name, rows in (("late", late), ("on-time", on)):
+            work = [r[1] for r in rows if r[1] is not None]
+            if not work:
+                continue
+            parts = [f"work {np.mean(work):.1f}"] + [
+                f"{k} {np.mean([r[3].get(k, 0.0) for r in rows]):.1f}" for k in keys]
+            out.append(f"  mean ms on {name} ticks: " + ", ".join(parts))
+        return out
+
+
 class BoardNotReady(RuntimeError):
     pass
 
@@ -86,8 +188,10 @@ class Go2BoardRobot(RobotInterface):
         self._t0 = clock()
         self._next = self._t0 + self.CONTROL_DT
         # The brain's own ticks: how many it handed over after the 20 Hz
-        # deadline had passed, and the worst by how much (step).
-        self.ticks, self.late, self.late_ms_max = 0, 0, 0.0
+        # deadline had passed, by how much, and what ran on them (step).
+        self.tick_log = BrainTicks(self.CONTROL_DT)
+        self._ret = None          # clock when the last step returned
+        self._gap = True          # request() since: the brain stood, not ticked
         self._cmd = (0.0, 0.0, 0.0)
         self._state, self._got = None, None
         # (board clock, map x, y, yaw) of recent states: a cloud is placed
@@ -162,27 +266,36 @@ class Go2BoardRobot(RobotInterface):
                      max(-self.MAX_W, min(self.MAX_W, float(w))))
 
     def step(self):
-        """Send this tick's command, then wait for the next 20 Hz tick."""
+        """Send this tick's command, then wait for the next 20 Hz tick.
+
+        The first step after request() (the start, a lift ride) is a gap,
+        not a late tick: the brain stood, and the schedule starts afresh."""
+        now = self.clock()
         self.link.send(*self._cmd, mode="walk")
-        wait = self._next - self.clock()
-        self.ticks += 1
-        if wait > 0:
-            self.sleep(wait)
-            self._next += self.CONTROL_DT
-        else:
-            self.late += 1
-            self.late_ms_max = max(self.late_ms_max, -wait * 1000.0)
+        if self._gap:
+            self._gap = False
+            self.tick_log.gap(0.0 if self._ret is None else now - self._ret)
             self._next = self.clock() + self.CONTROL_DT
+        else:
+            work_ms = None if self._ret is None else (now - self._ret) * 1000.0
+            wait = self._next - self.clock()
+            self.tick_log.tick(-wait * 1000.0, work_ms)
+            if wait > 0:
+                self.sleep(wait)
+                self._next += self.CONTROL_DT
+            else:
+                self._next = self.clock() + self.CONTROL_DT
+        self._ret = self.clock()
 
     def tick_summary(self):
-        """One line on the brain's ticks against the 20 Hz deadline."""
-        return (f"BRAIN TICK: {self.late} of {self.ticks} ticks late, worst "
-                f"{self.late_ms_max:.0f} ms past the {self.CONTROL_DT * 1000:.0f} ms deadline")
+        """The brain's ticks against the 20 Hz deadline: see BrainTicks."""
+        return "\n".join(self.tick_log.summary())
 
     def request(self, mode, until=None, timeout=5.0):
         """Ask the board for a mode ("stand", "lie", "limp") at 20 Hz, with
         zero velocity, until its state says `until` (default: no wait)."""
         end = self.clock() + timeout
+        self._gap = True                  # the next step() starts the schedule afresh
         while True:
             self.link.send(0.0, 0.0, 0.0, mode=mode)
             s = self.board_state()
