@@ -142,17 +142,18 @@ class FakeLink:
 
 
 def test_board_counts_late_ticks():
-    from cyberdog.sim.robot.go2_board_robot import Go2BoardRobot
+    from cyberdog.sim.robot.go2_board_robot import BrainTicks, Go2BoardRobot
     t = [0.0]
     r = Go2BoardRobot.__new__(Go2BoardRobot)
     r.link, r.clock, r.sleep = FakeLink(), (lambda: t[0]), (lambda s: t.__setitem__(0, t[0] + s))
     r._next, r._cmd = 0.05, (0.0, 0.0, 0.0)
-    r.ticks, r.late, r.late_ms_max = 0, 0, 0.0
+    r.tick_log, r._ret, r._gap = BrainTicks(0.05), None, False
+    log = r.tick_log
     t[0] = 0.01
     r.step()                                    # on time: sleeps to 0.05
-    assert (r.ticks, r.late) == (1, 0) and abs(t[0] - 0.05) < 1e-9
+    assert (log.ticks, log.late) == (1, 0) and abs(t[0] - 0.05) < 1e-9
     t[0] = 0.05 + 0.05 + 0.2                    # 200 ms past the next deadline
     r.step()
-    assert (r.ticks, r.late) == (2, 1) and abs(r.late_ms_max - 200.0) < 1e-6
-    assert r.tick_summary() == ("BRAIN TICK: 1 of 2 ticks late, worst 200 ms "
-                                "past the 50 ms deadline")
+    assert (log.ticks, log.late) == (2, 1) and abs(log.late_ms_max - 200.0) < 1e-6
+    assert r.tick_summary().splitlines()[0] == ("BRAIN TICK: 1 of 2 ticks late, worst "
+                                                "200 ms past the 50 ms deadline")

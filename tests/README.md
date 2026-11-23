@@ -17,7 +17,7 @@ conda activate cyberdog_sim
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
 
 Before a commit, run `pytest` and `python tests/selftest.py`. Both should end
-clean (`631 passed` as of 2026-11-23, `ALL PASS`).
+clean (`636 passed` as of 2026-11-23, `ALL PASS`).
 
 ## Before the first run
 
@@ -70,6 +70,7 @@ pytest -q                               # quieter
 | `test_dream_gate.py` | The VAMOS gate's chance constraint P(safe) >= 0.8 with confidence: when the dream stops, dreams more, passes or refuses | 9 |
 | `test_dream_timing.py` | Dreaming time per frame against the 50 ms control tick: counted, worst kept, overruns counted, nothing counted without a dream | 4 |
 | `test_dream_off_tick.py` | On the board the dream runs on the VAMOS worker, not the tick (twin unchanged); the worker judges from the latest published pose; the live clearance field is never seen cleared mid-update; the board counts late brain ticks | 5 |
+| `test_brain_ticks.py` | The board's per-tick log: a stand or lift ride is a gap, not a late tick; ticks tagged by a CE-RRT* search, a VAMOS ask or the worker dreaming during them; the end-of-run histogram and breakdown | 5 |
 | `test_vamos_affordance.py` | The affordance stage on VAMOS's candidates: what a refusal, a pass and "cannot say" do | 14 |
 | `test_vamos_steer.py` | The language preference in the VAMOS prompt (`--vamos-steer`) | 9 |
 | `test_vlm_worker.py` | The VAMOS call on a worker thread: the control loop keeps ticking while it runs; an answer from an ended leg is not judged | 6 |
