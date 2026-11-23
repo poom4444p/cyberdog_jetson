@@ -65,7 +65,7 @@ from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destinatio
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
                                            NEAR_R, Tracker, closest_approach, conflict)
-from cyberdog.sim.vamos_client import ahead
+from cyberdog.sim.vamos_client import TICK_MS, ahead
 
 START_LOCATION = "main entrance"
 # Where go2_board's odometry starts in the map frame, with --robot go2_board:
@@ -1877,7 +1877,16 @@ class Run:
             # Robot time, not ticks: on the board a slow tick would hide it.
             self.vlm_lat = (self.vlm_lat + [self.robot.now() - self.vlm_asked_t])[-VLM_CAP_N:]
         self.vlm["moved"] += math.dist(xy0, pose[:2])
-        return self.policy(floor).deliver(paths, pose, destination)
+        policy = self.policy(floor)
+        out = policy.deliver(paths, pose, destination)
+        # The tick that delivers an answer also dreams it: say when that alone
+        # overran the tick (the end-of-run summary has the worst). getattr: a
+        # stand-in policy (tests) need not time anything.
+        ms = getattr(policy, "dream_ms", None)
+        if ms is not None and ms > TICK_MS:
+            print(f"    [dream] {ms:.1f} ms > {TICK_MS:.0f} ms tick "
+                  f"({len(policy.verdicts)} candidates)")
+        return out
 
     def say(self, line):
         """One line of the Preemptive Voice Engine. Printed here, spoken later."""
@@ -4540,6 +4549,8 @@ def main():
               f"mean safety of the paths it followed {mean:.2f}")
         if st["failures"] and p.last_error:
             print(f"  last VAMOS failure: {p.last_error}")
+        if getattr(p, "dream", None) is not None and hasattr(p, "dream_summary"):
+            print(f"  {p.dream_summary()}")
     if args.vamos or args.shadow:
         v = run.vlm
         k = max(v["answers"], 1)
