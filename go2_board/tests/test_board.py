@@ -85,6 +85,17 @@ def test_lowers_a_target_that_would_exceed_peak_torque():
     assert np.all(out.q > s.q)                  # still pushing the same way
 
 
+def test_torque_fix_never_moves_a_target_past_the_end_stops():
+    # Running fast at a stop: the damping term alone is past the peak, and
+    # lowering it means a target beyond the stop. The range wins.
+    for sign, edge in ((1.0, go2.Q_MAX), (-1.0, go2.Q_MIN)):
+        s = state(q=edge - sign * 0.1)
+        s.dq[:] = sign * 25.0
+        out = Safety().filter(MotorCmd.hold(s.q, 60.0, 5.0), s, now=0.0)
+        assert np.all(out.q <= go2.Q_MAX - go2.Q_MARGIN + 1e-9)
+        assert np.all(out.q >= go2.Q_MIN + go2.Q_MARGIN - 1e-9)
+
+
 @pytest.mark.parametrize("why,s,cmd", [
     ("stale", state(stamp=0.0), MotorCmd.hold(go2.STAND, 60, 5)),
     ("tilted", state(quat=tipped(TILT_MAX + 0.1), stamp=1.0), MotorCmd.hold(go2.STAND, 60, 5)),

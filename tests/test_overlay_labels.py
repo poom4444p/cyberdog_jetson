@@ -168,9 +168,14 @@ class TestDoorSigns:
         assert (s["room 101"][1] - 9.5) * (s["room 106"][1] - 9.5) < 0
 
     def test_signs_land_inside_the_corridor(self):
-        """On the wall, not through it: the walls are at y 8.15 and 10.85."""
-        for xy in self.signs(1).values():
-            assert 8.15 <= xy[1] <= 10.85
+        """On the wall, not through it: the main corridor's walls are at
+        y 8.15 and 10.85, the wing's (north of it) at WING_WALL_X."""
+        from cyberdog.sim.scene.obstacles import WING_WALL_X
+        for floor in (1, 2, 3):
+            for name, (x, y) in self.signs(floor).items():
+                main = 8.15 <= y <= 10.85
+                wing = y > 10.85 and WING_WALL_X[0] <= x <= WING_WALL_X[1]
+                assert main or wing, f"{name} on floor {floor} at ({x}, {y})"
 
     def test_synonyms_collapse_to_one_sign(self):
         """stairs / staircase / stairway / stairwell are one stairwell."""

@@ -8,7 +8,8 @@ to damping, and stays there until reset(), when:
   - the body has tipped past TILT_MAX: it has fallen, or is falling;
   - the controller failed (raised, or returned nothing) this tick.
 Otherwise it clips each target inside the joint's range and lowers it until
-the torque the driver will compute stays inside the motor's peak.
+the torque the driver will compute stays inside the motor's peak; where the
+two disagree (a joint running fast at a stop), the range wins.
 """
 import math
 
@@ -55,7 +56,8 @@ class Safety:
 
     @staticmethod
     def limit(cmd, state):
-        q = np.clip(cmd.q, go2.Q_MIN + go2.Q_MARGIN, go2.Q_MAX - go2.Q_MARGIN)
+        lo, hi = go2.Q_MIN + go2.Q_MARGIN, go2.Q_MAX - go2.Q_MARGIN
+        q = np.clip(cmd.q, lo, hi)
         tau = np.clip(cmd.tau, -go2.TAU_MAX, go2.TAU_MAX)
         # The torque the driver will compute from this target, from where the
         # joint is now. Where it is past the peak, move the target in until
@@ -69,4 +71,8 @@ class Safety:
             want = np.sign(est[fix]) * go2.TAU_MAX[fix]
             q[fix] = state.q[fix] + (want - tau[fix]
                                      - cmd.kd[fix] * (cmd.dq[fix] - state.dq[fix])) / cmd.kp[fix]
+            # A joint running fast at a stop: its damping alone is past the
+            # peak, and lowering that would put the target beyond the stop.
+            # The range wins; the motor caps its own torque at the peak.
+            q = np.clip(q, lo, hi)
         return MotorCmd(q=q, dq=cmd.dq.copy(), kp=cmd.kp.copy(), kd=cmd.kd.copy(), tau=tau)

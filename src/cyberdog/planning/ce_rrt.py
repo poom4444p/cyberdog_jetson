@@ -253,7 +253,7 @@ class _Planner:
         self.cost.append(c)
         self.length.append(length)
         # Rewire: route a neighbour through the new node where that is cheaper.
-        # Its subtree's times shift earlier with it; `extract` checks the
+        # Its subtree's times shift earlier with it; `valid` checks the
         # whole path again at its real times before anything is returned.
         # An edge costs at least its length, so a neighbour that the straight
         # line could not make cheaper is not worth checking the edge for.
