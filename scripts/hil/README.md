@@ -184,7 +184,9 @@ clock is wherever it was at the last shutdown, until NTP sets it -- and with no
 network but the USB-C link, nothing does. The rig runs on monotonic clocks, so
 a wrong clock spoils only log times; `run_hil.sh` warns when it is more than
 2 s off, and `run_hil.sh clock` sets it from the Mac (sudo on the board, so it
-asks for the password). To set it without a password, a sudoers rule on the
+asks for the password). It reads the Mac's time before the prompt and the board
+adds how long the prompt took, timed on its own `/proc/uptime`, so the time
+spent typing the password is not lost (it was: the board stayed ~5 s behind). To set it without a password, a sudoers rule on the
 board can allow `date` alone, e.g. with `sudo visudo -f /etc/sudoers.d/date`:
 
 ```

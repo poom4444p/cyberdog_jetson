@@ -56,6 +56,11 @@ def passes(factor, why):
 # decide between them.
 BAND = 0.05
 
+# The brain's control tick, in ms. Dreaming runs inside it, on the tick that
+# delivers VAMOS's answer: a frame whose dreams take longer than this holds
+# that tick up. Counted in stats (dream_over_tick) and printed per floor.
+TICK_MS = 50.0
+
 
 def pixel_to_ground(u, v, cam, cam_pose):
     """Inverse of checkpoint_projector.project_to_pixel.
@@ -159,7 +164,13 @@ class VamosPolicy:
         self.stats = {"calls": 0, "failures": 0, "rejected": 0,
                       "rejected_by_gate": 0, "rejected_behind": 0,
                       "rejected_by_affordance": 0, "affordance_unjudged": 0,
-                      "safety_sum": 0.0, "chosen": 0}
+                      "safety_sum": 0.0, "chosen": 0,
+                      # wall-clock ms dreaming per answered call (frames that
+                      # dreamed at least one candidate): count, sum, worst, and
+                      # how many took longer than TICK_MS
+                      "dream_frames": 0, "dream_ms_sum": 0.0, "dream_ms_max": 0.0,
+                      "dream_over_tick": 0}
+        self.dream_ms = None            # last call's dreaming time, None if it dreamed nothing
         self.last_error = None     # why the latest failed call failed, for the log
 
     def available(self):
@@ -261,6 +272,25 @@ class VamosPolicy:
             self.frame_log.write(rec["seq"], rec)
         return paths
 
+    def _count_dream(self, ms):
+        """One frame's dreaming time, into stats."""
+        self.dream_ms = ms
+        st = self.stats
+        st["dream_frames"] += 1
+        st["dream_ms_sum"] += ms
+        st["dream_ms_max"] = max(st["dream_ms_max"], ms)
+        st["dream_over_tick"] += ms > TICK_MS
+
+    def dream_summary(self):
+        """One line on dreaming time per frame, worst against TICK_MS."""
+        st = self.stats
+        k = st["dream_frames"]
+        if not k:
+            return "dream time: no frame dreamed"
+        return (f"dream time: {k} frames, mean {st['dream_ms_sum'] / k:.1f} ms, "
+                f"worst {st['dream_ms_max']:.1f} ms, {st['dream_over_tick']} over the "
+                f"{TICK_MS:.0f} ms tick")
+
     def deliver(self, paths, pose, destination):
         """See _deliver; with --frame-log, also records what became of the
         candidates in the frame's record."""
@@ -273,6 +303,7 @@ class VamosPolicy:
                                 "factor": None if f is None else round(f, 4),
                                 "chosen": p is chosen} for p, f, v in self.verdicts]
             rec["safety"] = round(out[2], 4)
+            rec["dream_ms"] = None if self.dream_ms is None else round(self.dream_ms, 2)
             self.frame_log.write(rec["seq"], rec)
         return out
 
@@ -287,6 +318,7 @@ class VamosPolicy:
         """
         self.stats["calls"] += 1
         self.verdicts = []
+        self.dream_ms = None
         if paths is None:
             self.stats["failures"] += 1
             self.safety = 0.0
@@ -322,6 +354,7 @@ class VamosPolicy:
             walkable = kept
 
         scored = []
+        t0 = time.perf_counter()
         for p in walkable:
             if self.dream is None:
                 scored.append((1.0, p, {}))
@@ -335,6 +368,8 @@ class VamosPolicy:
                 continue
             scored.append((factor, p, why))
             self.verdicts.append((p, factor, "pass"))
+        if self.dream is not None and walkable:
+            self._count_dream((time.perf_counter() - t0) * 1000.0)
 
         if not scored:
             self.safety = 0.0

@@ -200,7 +200,16 @@ case "${1:-}" in
 
   clock)
     # A sudo password prompt needs a terminal: run this one yourself, not from a script.
-    ssh -t "$BOARD" "sudo date -u -s @$(date -u +%s) > /dev/null" && echo "board clock off by $(clock_offset) s" ;;
+    # The Mac's time is read here, before the prompt, so the board adds the time
+    # the prompt took (measured on its own monotonic /proc/uptime, which the wrong
+    # wall clock does not touch): otherwise the board ends up behind by however
+    # long the password took to type (~5 s, 11-23).
+    t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+    # shellcheck disable=SC2016
+    ssh -t "$BOARD" 'u0=$(cut -d" " -f1 /proc/uptime); sudo -v &&
+        t=$(awk -v t0='"$t0"' -v u0="$u0" -v u1="$(cut -d" " -f1 /proc/uptime)" \
+            "BEGIN { printf \"%.3f\", t0 + u1 - u0 }") &&
+        sudo date -u -s "@$t" > /dev/null' && echo "board clock off by $(clock_offset) s" ;;
 
   walk)
     new_out walk; check_clock
