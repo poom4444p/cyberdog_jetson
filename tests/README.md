@@ -10,14 +10,14 @@ conda activate cyberdog_sim
 
 | What | Command | Time | Needs |
 |---|---|---|---|
-| Unit tests | `pytest` | ~5 s | nothing |
-| Self-test, every stage | `python tests/selftest.py` | ~2.5 min | the building scene |
+| Unit tests | `pytest` | ~45 s | the building scene for a few (skipped without it) |
+| Self-test, every stage | `python tests/selftest.py` | ~5 min | the building scene |
 | Self-test, one stage | `python tests/selftest.py lidar` | 1–40 s | the building scene |
 | Location check | `python tests/test_locations.py` | ~2 s | nothing |
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
 
 Before a commit, run `pytest` and `python tests/selftest.py`. Both should end
-clean (`240 passed`, `ALL PASS`).
+clean (`622 passed` as of 2026-11-23, `ALL PASS`).
 
 ## Before the first run
 
@@ -36,8 +36,10 @@ clean (`240 passed`, `ALL PASS`).
 
 ## 1. Unit tests (`pytest`)
 
-Fast, no simulator, no scene. `pytest` runs every `test_*.py` file here and
-skips `selftest.py` on purpose (`pyproject.toml`).
+Mostly no simulator and no scene; the few that load the building scene (the
+twin robots) skip without it, and `test_camera_link.py`'s cross-check skips
+without `go2_world` installed (`pip install -e ../go2_world`). `pytest` runs
+every `test_*.py` file here and skips `selftest.py` on purpose (`pyproject.toml`).
 
 ```bash
 pytest                                  # all of them
@@ -60,10 +62,42 @@ pytest -q                               # quieter
 | `test_affordance_runtime.py` | The affordance network on a running dog: the elevation memory (the ceiling is not ground, a person who walked on leaves no ghost, what was not seen again is remembered, it forgets after 3 m, a new floor starts empty, a wall the map knows reads as floor but a crate beside it does not) and the walk-ahead target in the dog's frame | 13 |
 | `test_router_stairs.py` | Lift or stairs for a floor change: the lift unless out of service or 2x and 30 m further; the stair waiting point is outside the stairwell; walking routes never cross one | 14 |
 | `test_ce_rrt.py` | CE-RRT\* on synthetic corridors (no map, no sim): a straight line when the corridor is empty, curves not pivots, passing someone walking towards it with the chance margin, no plan when the corridor is shut, same seed same plan, the warm start keeping its side, letting someone overtake, a goal short of the next corner, fast enough for the control loop | 11 |
-| `test_pedestrians.py` | The two crowds: oblivious (the stress test) and aware (makes room for the dog and its user), stepped by hand beside a dog that is just a pose | 11 |
+| `test_pedestrians.py` | The two crowds: oblivious (the stress test) and aware (makes room for the dog and its user), stepped by hand beside a dog that is just a pose | 12 |
 | `test_control.py` | `sim/control.py`: when a waypoint counts as reached | 6 |
 | `test_describe_person.py` | What the person on the handle is told about somebody the dog is waiting for | 6 |
-| `test_autolabel.py` | `sim/autolabel.py`: a walked path turned into a VAMOS training pair, checked against the projector the live loop uses | 10 |
+| `test_autolabel.py` | `sim/autolabel.py`: a walked path turned into a VAMOS training pair, checked against the projector the live loop uses | 13 |
+| `test_fuzzy_intent.py` | The intent parser's place matching: a near miss from speech-to-text is matched, never taken on trust | 103 |
+| `test_dream_gate.py` | The VAMOS gate's chance constraint P(safe) >= 0.8 with confidence: when the dream stops, dreams more, passes or refuses | 9 |
+| `test_vamos_affordance.py` | The affordance stage on VAMOS's candidates: what a refusal, a pass and "cannot say" do | 14 |
+| `test_vamos_steer.py` | The language preference in the VAMOS prompt (`--vamos-steer`) | 9 |
+| `test_vlm_worker.py` | The VAMOS call on a worker thread: the control loop keeps ticking while it runs | 6 |
+| `test_frame_log.py` | `--frame-log`: the frame VAMOS got and what became of its answer, on disk | 3 |
+| `test_loc_head_goal_tail.py` | The VAMOS server's `--goal_tail` with a scripted model (needs torch) | 10 |
+| `test_go2_board_robot.py` | `Go2BoardRobot` and the twin against go2_board's end of the link over localhost UDP | 18 |
+| `test_board_model_robot.py` | `--robot twin-board`: the twin turning late and short, stopped by the board's guard | 7 |
+| `test_camera_link.py` | The dog's camera from go2_world (`CameraLink`) and `BoardTwinRobot.get_image` | 6 |
+| `test_map_fix.py` | The board's pose put back on the map (`sensing/map_fix.py`) | 9 |
+| `test_robot_interface.py` | The twin keeps to the interface the real dog plugs into | 4 |
+| `test_respect_board.py` | The brain works with the board's LiDAR guard, never backs into the person on the handle | 23 |
+| `test_step_aside_board.py` | Stepping aside on go2_board: the board's guard has the last word on the room sideways | 6 |
+| `test_spare_handler.py` | A turn that would put the person on the handle into a wall waits, then goes | 10 |
+| `test_block_reroute.py` | Blocked: go round, ask when there is no way round, then find another way | 5 |
+| `test_follow_overtake.py` | Somebody slower ahead: followed at a gap, or overtaken on the left when clear | 19 |
+| `test_overtaking.py` | People coming up behind are let past, not waited for | 6 |
+| `test_lanes_and_passing.py` | Keeping to the right-hand lane and passing people in the other lane | 5 |
+| `test_narrow_gap.py` | A gap beside the floor-1 trolley: wait for somebody in it, then through the other lined up | 14 |
+| `test_hold_side.py` | A committed detour side survives one tick of scan noise | 4 |
+| `test_plan_backoff.py` | CE-RRT\* is not searched every tick after a search found nothing | 4 |
+| `test_plan_hold.py` | A plan being walked is checked and kept, not searched again every replan | 4 |
+| `test_pose_test.py` | `LiveClearance.pose_test` gives CE-RRT\* the same answer as go_round's rules, faster | 10 |
+| `test_memory_grid.py` | `LiveClearance.remember`'s grid builds the same field as the old dict | 2 |
+| `test_tracking.py` | The tracker: coasting does not make a track move on its own | 4 |
+| `test_center_doors.py` | Walk lines go through doorways square and in the middle | 19 |
+| `test_widen_corners.py` | A right turn out of the right-hand lane swings wide of the corner | 10 |
+| `test_funnel.py` | Steering into a doorway on its axis | 10 |
+| `test_glide.py` | The scripted metres in and out of the lift car end where they were meant to | 4 |
+| `test_lift_exit.py` | Out of the lift: where to stand and which way to turn | 8 |
+| `test_floor_guard.py` | The simulated floor guard (history, outside SCOPE) | 13 |
 
 ## 2. Location check (`test_locations.py`)
 

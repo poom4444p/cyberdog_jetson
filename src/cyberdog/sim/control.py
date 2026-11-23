@@ -34,7 +34,7 @@ MIN_SEG = 0.3                   # metres: a waypoint nearer than this to the one
 
 
 def wrap(a):
-    """An angle folded into (-pi, pi]."""
+    """An angle folded into [-pi, pi)."""
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 

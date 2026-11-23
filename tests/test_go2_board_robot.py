@@ -242,6 +242,13 @@ def test_scan_is_the_boards_cloud_in_the_map_frame(twin):
     import numpy as np
     from go2_board.lidar import BRAIN_CLOUD_PORT, cloud_datagrams
     robot, board = twin                                # at map (22, 10), facing +y
+    # A state stamped with the cloud's board time: the cloud is placed from
+    # that, not from the fixture's state (unstamped, and stale once loading
+    # the twin's scene took more than STATE_STALE_S).
+    board.send_state(t=0.0, x=1.0, y=0.5, z=0.35, yaw=math.pi / 2, mode="WALK", tripped=None,
+                     walker=True)
+    settle()
+    robot.board.board_state()
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         pts = np.array([[2.0, 0.0, 0.5], [0.0, -1.0, 0.0]], np.float32)   # ahead, and to the right
