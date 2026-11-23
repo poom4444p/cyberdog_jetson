@@ -1412,6 +1412,11 @@ class Run:
         self.board_plan_to = None # the heading the plan wanted when the turn took its way
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
+        # On the board the worker also judges the answer (ask_and_judge): from
+        # the pose and destination the loop last published here, and only
+        # while the leg it was asked on (vlm_gen) is still being walked.
+        self.vlm_now = None       # ((x, y, yaw), destination) as of the last tick
+        self.vlm_gen = 0          # +1 each leg: a worker from an older one judges nothing
         # Every velocity command sent, fingerprinted. Two runs of the same
         # route and seed with equal fingerprints commanded the dog identically,
         # tick for tick -- which is how a shadow run proves it touched nothing.
@@ -1816,13 +1821,14 @@ class Run:
         run_building's own default is VLM_LATENCY, the dog's.
         """
         if self.real_time:
-            # Frame and lens pose now, on this thread (the renderer's); only
-            # the HTTP call and the projection go to the worker.
+            # Frame and lens pose now, on this thread (the renderer's); the
+            # HTTP call, the projection and the judging go to the worker.
             if self.vlm_pool is None:
                 self.vlm_pool = concurrent.futures.ThreadPoolExecutor(1, "vamos")
             self.vlm_worker = self.vlm_pool.submit(
-                self.policy(floor).request, self.robot.get_image().copy(),
-                vamos_prompt(state, self.vamos_steer), self.robot.camera_pose())
+                self.ask_and_judge, self.policy(floor), self.robot.get_image().copy(),
+                vamos_prompt(state, self.vamos_steer), self.robot.camera_pose(),
+                self.vlm_gen)
             self.pending = (self.vlm_worker, None, n, self.robot.get_pose()[:2])
             self.vlm["asked"] += 1
             self.vlm_asked_t = self.robot.now()
@@ -1837,6 +1843,26 @@ class Run:
         self.pending = (n + int(round(wait / self.robot.CONTROL_DT)), paths,
                         n, self.robot.get_pose()[:2])
         self.vlm["asked"] += 1
+
+    def ask_and_judge(self, policy, image, prompt, cam_pose, gen):
+        """On the VAMOS worker (board only): ask, then judge the answer --
+        the gate and the dream -- from the pose the loop published last tick
+        (vlm_now). Returns deliver()'s triple, or None for an answer whose leg
+        has ended: nothing judged, nothing counted.
+
+        The dream used to run on the tick that took the answer, inside the
+        control loop: on the J4012 that was 81-220 ms a frame on average and
+        462 ms at worst, against a 50 ms tick (HIL 11-23 11:17, room 201 P6),
+        so the brain stood still for up to nine ticks each time an answer
+        landed. Here it costs the loop nothing but the GIL it shares. The pose
+        it judges from is at most one tick old, as the old one was.
+        """
+        paths = policy.request(image, prompt, cam_pose)
+        now = self.vlm_now
+        if gen != self.vlm_gen or now is None:
+            return None
+        pose, destination = now
+        return policy.deliver(paths, pose, destination)
 
     def vlm_speed_cap(self):
         """Fastest the dog may walk on VAMOS's word, m/s: see VLM_REACH_D.
@@ -1864,10 +1890,11 @@ class Run:
         if self.pending is None:
             return None
         lands, paths, asked_at, xy0 = self.pending
+        judged = None
         if isinstance(lands, concurrent.futures.Future):
             if not lands.done():
                 return None
-            paths = lands.result()
+            judged = lands.result()          # judged on the worker already
         elif n < lands:
             return None
         self.pending = None
@@ -1877,11 +1904,13 @@ class Run:
             # Robot time, not ticks: on the board a slow tick would hide it.
             self.vlm_lat = (self.vlm_lat + [self.robot.now() - self.vlm_asked_t])[-VLM_CAP_N:]
         self.vlm["moved"] += math.dist(xy0, pose[:2])
+        if judged is not None:
+            return judged
         policy = self.policy(floor)
         out = policy.deliver(paths, pose, destination)
-        # The tick that delivers an answer also dreams it: say when that alone
-        # overran the tick (the end-of-run summary has the worst). getattr: a
-        # stand-in policy (tests) need not time anything.
+        # In the twin the tick that delivers an answer also dreams it: say
+        # when that alone overran the tick (the end-of-run summary has the
+        # worst). getattr: a stand-in policy (tests) need not time anything.
         ms = getattr(policy, "dream_ms", None)
         if ms is not None and ms > TICK_MS:
             print(f"    [dream] {ms:.1f} ms > {TICK_MS:.0f} ms tick "
@@ -3134,6 +3163,7 @@ class Run:
             self.exit_from = None            # not a leg out of the lift: see EXIT_CLEAR_M
         # An answer still on its way from the last leg is about a corridor the
         # dog has left -- another floor, or the far side of a lift ride.
+        self.vlm_gen += 1
         if self.pending is not None:
             self.pending = None
             self.vlm["dropped"] += 1
@@ -3457,11 +3487,11 @@ class Run:
             # Asked back to back (see VLM_REACH_D): as soon as the last answer
             # has landed, from this tick's frame; the loop carries on either
             # way. `asked` is an answer arriving this tick.
+            self.vlm_now = ((x, y, yaw), state.get("destination") or waypoints[-1])
             if ((self.vamos or self.shadow) and state["state"] == "TRACK"
                     and self.pending is None and not self.vlm_busy()):
                 self.ask_vamos(floor, n, state)
-            answer = self.take_answer(floor, n, (x, y, yaw),
-                                      state.get("destination") or waypoints[-1])
+            answer = self.take_answer(floor, n, *self.vlm_now)
             asked = answer is not None
             if asked:
                 proposed, candidates, safety = answer
@@ -4550,7 +4580,9 @@ def main():
         if st["failures"] and p.last_error:
             print(f"  last VAMOS failure: {p.last_error}")
         if getattr(p, "dream", None) is not None and hasattr(p, "dream_summary"):
-            print(f"  {p.dream_summary()}")
+            where = (" (on the VAMOS worker, off the control tick)" if run.real_time
+                     else " (on the control tick)")
+            print(f"  {p.dream_summary()}{where}")
     if args.vamos or args.shadow:
         v = run.vlm
         k = max(v["answers"], 1)
@@ -4558,7 +4590,8 @@ def main():
         print(f"VLM ASYNC: {v['asked']} asked, {v['answers']} answered, {dropped} "
               f"dropped at a leg's end; answers were {v['age'] / k:.1f}s old on "
               f"arrival, the dog {v['moved'] / k:.2f} m on from where it asked; "
-              f"the control loop never waited")
+              f"the control loop never waited for the VLM"
+              + ("" if run.real_time else " (the dream: see dream time above)"))
         if args.vamos and v["cap_min"] is not None:
             lat = max(run.vlm_lat) if run.vlm_lat else float("nan")
             print(f"VLM SPEED CAP: {run.vlm_speed_cap():.2f} m/s at the end "
@@ -4570,6 +4603,9 @@ def main():
         print(f"SHADOW: {sn['calls']} VAMOS calls logged, {sn['steer']} would have "
               f"steered more than {math.degrees(SHADOW_DISAGREE):.0f} deg off the map "
               f"route, {sn['none']} had nothing pass the gate -> {args.shadow_log}")
+    board = getattr(run.robot, "board", None)
+    if hasattr(board, "tick_summary"):
+        print(board.tick_summary())
     # Tick for tick what the dog was told to do; compare across runs.
     print(f"commands: {run.n_commands} ticks, sha256 {run.commands.hexdigest()[:16]}")
     o, h = run.obs, run.hits

@@ -205,9 +205,10 @@ class LiveClearance:
         no SHADOW behind it -- a camera sees the floor beyond a puddle, and a
         shadowed puddle closed the way round it (twin, seed 1, 11-16). Not in
         `points`, which the tracker and the drawing read."""
-        self.local = self.still = None
-        self.points = np.empty((0, 2))
-        self._scan = None
+        # The new field is built first and swapped in whole at the end: the
+        # VAMOS worker dreams against this object while the loop updates it
+        # (run_building.ask_and_judge), and a field cleared to None first read
+        # as nothing detected for as long as the transform took.
         self._flat = (np.asarray(flat, float).reshape(-1, 2)
                       if flat is not None and len(flat) else None)
         px = py = np.empty(0)
@@ -228,10 +229,14 @@ class LiveClearance:
                 known = np.where(wall_only, face < FACE_EXPLAINED, static <= EXPLAINED)
                 px, py = qx[~known], qy[~known]
         if len(px) == 0 and self._flat is None:
+            self.local = self.still = None
+            self.points = np.empty((0, 2))
+            self._scan = None
             return
+        local = self._field(px, py, centre, origin)
         self.points = np.column_stack([px, py])
         self._scan = (px, py, centre, origin)
-        self.local = self.still = self._field(px, py, centre, origin)
+        self.local = self.still = local
 
     def exclude(self, movers):
         """Rebuild the planning field with these things left out of it.
@@ -309,6 +314,11 @@ class LiveClearance:
         who stops is still a person, and remembering where they stood would
         leave a ghost the turn-easing steers the handle round. Call after
         `exclude`, once per scan."""
+        # Swapped in whole, never cleared first: see update.
+        self.recent = self._remembered(people, now, centre)
+
+    def _remembered(self, people, now, centre):
+        """remember()'s work: the new `recent` field, or None."""
         if self.seen is None:
             # The map's box and WINDOW + 1 m round it, in the cells' own keys
             # (int() of metres / res, as the dict had them). The dog is always
@@ -334,7 +344,6 @@ class LiveClearance:
             r = (py / self.res).astype(int) - self.mr0
             ok = (r >= 0) & (r < self.seen.shape[0]) & (c >= 0) & (c < self.seen.shape[1])
             self.seen[r[ok], c[ok]] = now
-        self.recent = None
         x0, y0 = centre[0] - WINDOW, centre[1] - WINDOW
         # Only the cells that can land in the window: keys a cell either side.
         c_lo = max(int(x0 / self.res) - 2 - self.mc0, 0)
@@ -342,10 +351,10 @@ class LiveClearance:
         c_hi = min(int((x0 + 2 * WINDOW) / self.res) + 3 - self.mc0, self.seen.shape[1])
         r_hi = min(int((y0 + 2 * WINDOW) / self.res) + 3 - self.mr0, self.seen.shape[0])
         if c_lo >= c_hi or r_lo >= r_hi:
-            return
+            return None
         rr, cc = np.nonzero(now - self.seen[r_lo:r_hi, c_lo:c_hi] <= MEMORY_S)
         if not len(rr):
-            return
+            return None
         # The dict's own sums, on the cells' keys, so the field is the same.
         kc = (cc + c_lo + self.mc0).astype(float)
         kr = (rr + r_lo + self.mr0).astype(float)
@@ -353,17 +362,18 @@ class LiveClearance:
         r = (((kr + 0.5) * self.res - y0) / self.res).astype(int)
         ok = (r >= 0) & (r < self.n) & (c >= 0) & (c < self.n)
         if not ok.any():
-            return
+            return None
         occ = np.zeros((self.n, self.n), dtype=bool)
         occ[r[ok], c[ok]] = True
-        self.recent = (ndimage.distance_transform_edt(~occ) * self.res, x0, y0)
+        return (ndimage.distance_transform_edt(~occ) * self.res, x0, y0)
 
     def remembered_at(self, x, y):
         """Distance to the nearest standing thing seen in the last MEMORY_S,
         in sight now or not. See MEMORY_S for why only the handle asks."""
-        if self.recent is None:
+        field = self.recent             # once: the worker reads while the loop writes
+        if field is None:
             return INF
-        edt, x0, y0 = self.recent
+        edt, x0, y0 = field
         c = int((x - x0) / self.res)
         r = int((y - y0) / self.res)
         if 0 <= r < self.n and 0 <= c < self.n:
@@ -383,9 +393,10 @@ class LiveClearance:
         `exclude` leaves behind, so a walking person is not in it. See there
         for why.
         """
-        if self.still is None:
+        field = self.still             # once: the worker reads while the loop writes
+        if field is None:
             return INF
-        edt, x0, y0 = self.still
+        edt, x0, y0 = field
         c = int((x - x0) / self.res)
         r = int((y - y0) / self.res)
         if 0 <= r < self.n and 0 <= c < self.n:
@@ -499,9 +510,10 @@ class LiveClearance:
         c = int((x - self.ox) / self.res)
         r = int(self.H - 1 - (y - self.oy) / self.res)
         s = float(self.dist[r, c]) if (0 <= r < self.H and 0 <= c < self.W) else 0.0
-        if self.local is None:
+        local = self.local              # once: the worker reads while the loop writes
+        if local is None:
             return s
-        edt, x0, y0 = self.local
+        edt, x0, y0 = local
         lc = int((x - x0) / self.res)
         lr = int((y - y0) / self.res)
         if 0 <= lr < self.n and 0 <= lc < self.n:
