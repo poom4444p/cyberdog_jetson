@@ -15,9 +15,9 @@ that do is a collision probability, and that is the safety factor:
 
     safety = P(no collision) x (how much room it left)
 
-which is the spec's chance constraint (CE-RRT*, P_coll < 0.01) arrived at by
-sampling instead of by algebra, and it feeds the same confidence gate the
-affordance MLP will feed later.
+which is the spec's chance constraint arrived at by sampling instead of by
+algebra -- but at P_SAFE_MIN 0.8 below, i.e. P_coll <= 0.2, not the spec's
+P_coll < 0.01: a known deviation, to be stated in any report.
 
 Two honest limits. The rollouts use the kinematic model the twin is built on,
 so they inherit its optimism -- no gait, no contacts, no real dynamics. And

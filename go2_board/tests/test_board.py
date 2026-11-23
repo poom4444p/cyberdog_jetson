@@ -113,6 +113,42 @@ def test_goes_limp_and_stays_limp(why, s, cmd):
     assert safety.filter(MotorCmd.hold(go2.STAND, 60, 5), state(stamp=5.0), now=5.0).kp[0] == 60
 
 
+def _nan_at(a, i=4):
+    a = np.array(a, float)
+    a[i] = np.nan
+    return a
+
+
+@pytest.mark.parametrize("why,s,cmd", [
+    ("command not finite", state(stamp=1.0),
+     MotorCmd.hold(_nan_at(go2.STAND), 60, 5)),
+    ("command not finite", state(stamp=1.0),
+     MotorCmd(q=go2.STAND.copy(), kp=np.full(go2.N, 60.0), kd=np.full(go2.N, 5.0),
+              tau=_nan_at(np.zeros(go2.N)))),
+    ("state not finite", state(q=_nan_at(go2.STAND), stamp=1.0), MotorCmd.hold(go2.STAND, 60, 5)),
+])
+def test_a_nan_never_reaches_the_motors(why, s, cmd):
+    safety = Safety()
+    out = safety.filter(cmd, s, now=1.0)
+    assert safety.tripped == why
+    assert np.all(out.kp == 0) and np.all(out.kd == go2.KD_DAMP)
+    for a in (out.q, out.dq, out.kp, out.kd, out.tau):
+        assert np.all(np.isfinite(a))
+
+
+def test_go_limp_rides_out_a_missed_read():
+    clock = Clock()
+
+    class Flaky(FakeBus):
+        def read(self):
+            self.n = getattr(self, "n", 0) + 1
+            return self.s if self.n % 2 else None
+
+    bus = Flaky(state())
+    Board(bus, clock=clock, sleep=clock.sleep).go_limp(0.1)
+    assert bus.sent and all(np.all(c.kp == 0) for c in bus.sent)
+
+
 def test_sends_nothing_before_the_first_state():
     assert Safety().filter(MotorCmd(), None, now=0.0) is None
 

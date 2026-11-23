@@ -5,7 +5,7 @@ set_velocity goes to the board as vx, vy, w over the localhost link, and
 get_pose comes back from the board's state messages. The board owns the
 legs, safety and the walking policy; nothing here touches a motor.
 
-Needs go2_board installed (pip install -e ~/Work/unitree/go2_board). The
+Needs go2_board installed (pip install -e go2_board, from this repo). The
 import is inside __init__, so the twin runs without it.
 
 get_scan is the board's Mid-360 cloud; get_image, with camera_host, is the
@@ -547,8 +547,9 @@ class BoardTwinRobot(MujocoRobot):
         if self.map_fix is not None:
             self.map_fix.use(None)             # another floor: its own correction, from none
         self.board.set_velocity(0.0, 0.0, 0.0)
-        self.board.request("stand", until="STAND", timeout=5.0)
-        s = self.board.board_state()
+        s = self.board.request("stand", until="STAND", timeout=5.0)
+        if s is None or s.get("z") is None:   # request() returns the state that said STAND
+            raise BoardNotReady("no height from the board before the ride")
         stand_h = s["z"] - self.z              # trunk above the floor, standing
         self.lift.call(to_floor)
         goal = floor_z + stand_h

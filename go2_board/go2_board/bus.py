@@ -42,8 +42,10 @@ class MotorCmd:
     def damping(cls, q):
         """No stiffness, only damping: the legs fold under the body's weight,
         slowly. What the board sends whenever it cannot trust what it would
-        otherwise send."""
-        return cls(q=np.asarray(q, float).copy(), kd=np.full(go2.N, go2.KD_DAMP))
+        otherwise send. A NaN angle is sent as 0: kp is 0, but 0 * NaN is
+        still NaN in the driver's sum."""
+        return cls(q=np.nan_to_num(np.asarray(q, float), nan=0.0, posinf=0.0, neginf=0.0),
+                   kd=np.full(go2.N, go2.KD_DAMP))
 
 
 class MotorBus:

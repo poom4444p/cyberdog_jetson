@@ -27,17 +27,19 @@
 #   VAMOS_GOAL_TAIL                 1 (default) = decode 4 points, end every path at the
 #                                   prompt's goal (vlm_server.py --goal_tail; needs
 #                                   VAMOS_LOC_HEAD=1; ~1.8 s a call, not ~2.3); 0 = decode in full
-#   VAMOS_MODE                      shadow (default) = VAMOS is asked every frame and its
-#                                   paths logged ($CYBERDOG/output/shadow_log.jsonl), the
-#                                   map route drives, no VLM speed cap (up to MAX_V);
-#                                   steer = VAMOS steers (--vamos), pace capped by its
-#                                   latency (run_building.VLM_REACH_D, ~0.81 m/s at 1.8 s)
+#   VAMOS_MODE                      steer (default, the full pipeline) = VAMOS steers
+#                                   (--vamos), pace capped by its latency
+#                                   (run_building.VLM_REACH_D, ~0.81 m/s at 1.8 s);
+#                                   shadow = measurement only: VAMOS is asked every frame
+#                                   and its paths logged ($CYBERDOG/output/shadow_log.jsonl),
+#                                   the map route drives, no VLM speed cap (up to MAX_V)
 #   IFACE                           DDS interface to the world (USB-C: l4tbr0)
 #   POLICY                          walking policy, relative to GO2_BOARD
-#   STALE_MS                        go limp after this long without a state. 200 for
-#                                   the Mac's world, which now and then pauses for
-#                                   100+ ms; empty for board_main's own 50 ms, the
-#                                   limit for anything with real motors
+#   STALE_MS                        go limp after this long without a state. Unset or
+#                                   empty (default): board_main's own 50 ms, the limit
+#                                   for anything with real motors. 200 only for the
+#                                   Mac's world, which now and then pauses for 100+ ms
+#                                   (run_hil.sh passes it)
 #   LIFT_HOST                       where the world takes lift calls (the Mac)
 #   CAMERA=0                        brain: VAMOS sees the twin's own render (no people),
 #                                   not the dog's camera from the world on LIFT_HOST
@@ -69,10 +71,10 @@ VAMOS_PORT=${VAMOS_PORT:-8009}
 VAMOS_MODEL=${VAMOS_MODEL:-mateoguaman/vamos}
 VAMOS_LOC_HEAD=${VAMOS_LOC_HEAD:-1}
 VAMOS_GOAL_TAIL=${VAMOS_GOAL_TAIL:-1}
-VAMOS_MODE=${VAMOS_MODE:-shadow}
+VAMOS_MODE=${VAMOS_MODE:-steer}
 IFACE=${IFACE:-l4tbr0}
 POLICY=${POLICY:-policies/go2_flat_v5}
-STALE_MS=${STALE_MS-200}
+STALE_MS=${STALE_MS:-}             # empty: board_main's 50 ms (real motors)
 LIFT_HOST=${LIFT_HOST:-192.168.55.100}
 CAMERA=${CAMERA:-1}
 BOARD_CORES=${BOARD_CORES:-6,7}
@@ -84,6 +86,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 vamos_up() {
     curl -s --max-time 2 "http://127.0.0.1:$VAMOS_PORT/health" | grep -q '"model_loaded":true'
+}
+
+# The commit this copy came from, written by `run_hil.sh sync` (the board has no .git).
+version() {
+    cat "$CYBERDOG/VERSION" 2>/dev/null || echo "unknown (not copied by run_hil.sh sync)"
 }
 
 vamos_to_brain_cores() {
@@ -107,6 +114,8 @@ case "${1:-}" in
          --port "$VAMOS_PORT" --model_path "$VAMOS_MODEL" \
          $([ "$VAMOS_LOC_HEAD" = 1 ] && echo --loc_head) \
          $([ "$VAMOS_GOAL_TAIL" = 1 ] && echo --goal_tail) > "$VAMOS_LOG" 2>&1 < /dev/null &)
+    [ "$VAMOS_MODEL" = mateoguaman/vamos ] && echo "VAMOS: WARNING starting the BASE model" \
+        "(no VAMOS_MODEL given); the fine-tune is e.g. VAMOS_MODEL=$CYBERDOG/models/vamos_L_merged"
     for _ in $(seq 1 120); do
         vamos_up && { echo "VAMOS: up ($VAMOS_MODEL)"; exit 0; }
         sleep 2
@@ -122,9 +131,10 @@ case "${1:-}" in
     [ -n "${LIO_RECORD:-}" ] && stale+=(--record "$LIO_RECORD")   # :- for set -u: unset is no recording
     [ -n "${POSE:-}" ] && stale+=(--pose "$POSE")
     rm -f "$BOARD_LOG"
+    echo "[board] code: $(version)" > "$BOARD_LOG"
     (cd "$GO2_BOARD" || exit 1; . "$GO2ENV/bin/activate"
      nohup taskset -c "$BOARD_CORES" python -u scripts/board_main.py --iface "$IFACE" \
-         --policy "$POLICY" "${stale[@]}" > "$BOARD_LOG" 2>&1 < /dev/null &)
+         --policy "$POLICY" "${stale[@]}" >> "$BOARD_LOG" 2>&1 < /dev/null &)
     for _ in $(seq 1 30); do
         grep -q "\[board\] up" "$BOARD_LOG" 2>/dev/null && break
         sleep 0.5
@@ -144,6 +154,7 @@ case "${1:-}" in
         steer)  mode=(--vamos) ;;
         *)      echo "VAMOS_MODE: shadow or steer, not '$VAMOS_MODE'"; exit 1 ;;
     esac
+    echo "code: $(version)"
     echo "VAMOS_MODE=$VAMOS_MODE${VAMOS_STEER:+ VAMOS_STEER=$VAMOS_STEER}"
     steer=()
     [ -n "${VAMOS_STEER:-}" ] && steer=(--vamos-steer "$VAMOS_STEER")
@@ -183,6 +194,7 @@ case "${1:-}" in
 
   status)
     pgrep -af "[b]oard_main|[r]un_building|[v]lm_server" || echo "nothing running"
+    echo "code: $(version)"
     if vamos_up; then
         echo "VAMOS: up ($(curl -s --max-time 2 "http://127.0.0.1:$VAMOS_PORT/health" | sed -n 's/.*"model_path": *"\([^"]*\)".*/\1/p'))"
     else echo "VAMOS: down"; fi
@@ -190,5 +202,5 @@ case "${1:-}" in
     nvpmodel -q 2>/dev/null | head -1 ;;
 
   *)
-    sed -n '2,30p' "$0"; exit 2 ;;
+    sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 2 ;;
 esac

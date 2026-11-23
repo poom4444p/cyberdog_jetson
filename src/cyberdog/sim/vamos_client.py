@@ -5,9 +5,8 @@ needs torch and this environment deliberately does not have it -- the same
 split the real robot has, where the VLM is a service rather than an import.
 
 "AI proposes, simple code disposes": VAMOS returns five candidate paths and a
-deterministic scorer picks one. On the real system that scorer is the
-affordance MLP; here it is the ground-truth map, which is honest for a PoC
-and gives the MLP something to be measured against.
+deterministic scorer picks one, against the live clearance field (the map plus
+what the LiDAR found that the map cannot explain).
 
 Up to three stages to the disposing. First a cheap geometric test throws out
 anything whose drawn line leaves free space -- no point imagining a path that
@@ -56,9 +55,10 @@ def passes(factor, why):
 # decide between them.
 BAND = 0.05
 
-# The brain's control tick, in ms. Dreaming runs inside it, on the tick that
-# delivers VAMOS's answer: a frame whose dreams take longer than this holds
-# that tick up. Counted in stats (dream_over_tick) and printed per floor.
+# The brain's control tick, in ms. In the twin, dreaming runs inside it, on the
+# tick that delivers VAMOS's answer; on the board it runs on the VAMOS worker,
+# but shares the GIL, so a long dream still slows the loop. Dreams longer than
+# this are counted in stats (dream_over_tick) and printed per floor.
 TICK_MS = 50.0
 
 
