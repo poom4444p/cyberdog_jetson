@@ -39,6 +39,7 @@ VENDOR_DIR = ROOT / "vendor"
 MODELS_DIR = ROOT / "models"
 LORA_ADAPTER = MODELS_DIR / "lora"                  # the gemma-2b-it fine-tune
 LORA_OUTPUTS = MODELS_DIR / "lora_training_outputs"  # training checkpoints
+VOICE_MODELS = MODELS_DIR / "voice"                 # whisper.cpp + Piper (cyberdog.voice)
 
 DATASETS_DIR = ROOT / "datasets"
 RAW_DATASET = DATASETS_DIR / "raw_dataset_english.json"

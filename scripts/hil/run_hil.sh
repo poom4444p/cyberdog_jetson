@@ -8,6 +8,8 @@
 #   bash scripts/hil/run_hil.sh walk              stand, walk 4 s, stand: is the board's loop sound? (~1 min)
 #   bash scripts/hil/run_hil.sh route DEST [N]    the whole route to DEST, VAMOS asked for N paths (5)
 #   bash scripts/hil/run_hil.sh stop              stop the world here and the board and brain there
+#   bash scripts/hil/run_hil.sh voice-setup       copy models/voice to the board and install the voice
+#                                                 extra into its go2env (once; offline: WHEELS=DIR)
 #
 # Each run writes its logs to $OUT (output/hil/<time>-<what>) and ends with a
 # summary: the brain's outcome, how regularly states and commands moved, and
@@ -70,6 +72,8 @@
 #                true pose (go2_board.record); copied to $OUT/lio/. With
 #                LIDAR_ARGS=--dense for the real unit's point rate
 #   ROUTE_S      a route is stopped after this long, in seconds  (560)
+#   VOICE=1      route: the command is said to the dog's microphone ("hey dog, ..."),
+#                not DEST, and the dog speaks; see onboard.sh. VOICE_ARGS passes on
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -95,6 +99,8 @@ TRACK_LOG=${TRACK_LOG:-0}
 VAMOS_MODE=${VAMOS_MODE:-steer}
 STALE_MS=${STALE_MS:-200}          # the world here is a simulator (onboard.sh's default is 50)
 VAMOS_STEER=${VAMOS_STEER:-}
+VOICE=${VOICE:-0}
+VOICE_ARGS=${VOICE_ARGS:-}
 CLOUD_LOG=${CLOUD_LOG:-0}
 FRAME_LOG=${FRAME_LOG:-0}
 LIO_RECORD=${LIO_RECORD:-0}
@@ -210,6 +216,26 @@ case "${1:-}" in
         || { echo "synced, but VERSION not written"; exit 1; }
     echo "$(basename "$CYBERDOG") -> $BOARD:~/$REMOTE ($version)" ;;
 
+  voice-setup)
+    # models/ is not synced (it holds GBs of VAMOS weights); the voice's are ~210 MB.
+    [ -f "$CYBERDOG/models/voice/en_US-lessac-medium.onnx" ] \
+        || { echo "no models/voice here: run the voice once on this Mac, or see cyberdog/voice"; exit 1; }
+    on_board "mkdir -p ~/$REMOTE/models" || { echo "board: unreachable at $BOARD"; exit 1; }
+    rsync -a "$CYBERDOG/models/voice" "$BOARD:~/$REMOTE/models/" || { echo "rsync failed"; exit 1; }
+    # An offline board: WHEELS=DIR of aarch64 cp310 wheels, made here with
+    #   pip download --dest DIR --platform manylinux2014_aarch64 --platform manylinux_2_28_aarch64 \
+    #       --python-version 3.10 --implementation cp --only-binary=:all: sounddevice pywhispercpp piper-tts
+    from=""
+    if [ -n "${WHEELS:-}" ]; then
+        rsync -a "$WHEELS/" "$BOARD:~/voice_wheels/" || { echo "rsync of wheels failed"; exit 1; }
+        from="--no-index --find-links ~/voice_wheels"
+    fi
+    on_board "$BOARD_PY -m pip install $from sounddevice pywhispercpp piper-tts" || \
+        { echo "pip failed on the board (offline? try WHEELS=DIR)"; exit 1; }
+    on_board "dpkg -s libportaudio2 > /dev/null 2>&1" || \
+        echo "voice: libportaudio2 missing on the board (sudo apt install libportaudio2): no mic or speaker until then"
+    echo "voice: models and packages on the board; check: $BOARD_PY ~/$REMOTE/scripts/hil/voice_check.py" ;;
+
   clock)
     # A sudo password prompt needs a terminal: run this one yourself, not from a script.
     # The Mac's time is read here, before the prompt, so the board adds the time
@@ -267,7 +293,7 @@ case "${1:-}" in
     start_gaps
     brain_args=${BRAIN_ARGS:-}
     for p in $PUDDLES; do brain_args+=" --puddle-at $p"; done
-    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE CAMERA=$CAMERA TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG FRAME_LOG=$FRAME_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
+    on_board "BRAIN_ARGS='$brain_args' VAMOS_STEER=$(printf %q "$VAMOS_STEER") VAMOS_MODE=$VAMOS_MODE VOICE=$VOICE VOICE_ARGS=$(printf %q "$VOICE_ARGS") CAMERA=$CAMERA TRACE=$TRACE TRACK_LOG=$TRACK_LOG CLOUD_LOG=$CLOUD_LOG FRAME_LOG=$FRAME_LOG timeout ${ROUTE_S:-560} $ONBOARD brain '$dest' ${3:-5}" > "$OUT/brain.log" 2>&1
     grep -E "^code:|VAMOS_MODE|^camera:|\[camera\]|ARRIVED|FAILED|HALTED|leg |obstacles|collisions|VAMOS floor|VLM ASYNC|VLM SPEED CAP|SHADOW|FLOOR GUARD|floor guard|puddles|help|planner|\[udp\]" \
         "$OUT/brain.log" | awk '!seen[$0]++' | cut -c1-230
     show_gaps

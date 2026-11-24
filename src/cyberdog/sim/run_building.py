@@ -32,6 +32,7 @@ import json
 import math
 import os
 import random
+import re
 import struct
 import sys
 import time
@@ -1027,6 +1028,62 @@ BACK_V = 0.15             # m/s, backwards -- slow enough to feel deliberate on
 BACK_STEP = 0.45          # how far behind is checked before reversing into it
 
 
+# --- --voice: the command and the answers out loud (cyberdog.voice) ----------
+VOICE_TRIES = 4          # a yes/no not understood is asked again, up to this many times
+
+
+def spoken_prompt(prompt):
+    """A question as said to somebody answering by voice, not on the handle:
+    "Press continue to go there." -> "Say yes to go there."."""
+    return re.sub(r"\b([Pp])ress continue",
+                  lambda m: "Say yes" if m.group(1) == "P" else "say yes", prompt)
+
+
+def start_voice(args):
+    """(Speaker, Listener) for --voice, stopped cleanly when the run exits."""
+    import atexit
+    try:
+        from cyberdog.voice import Listener, Speaker
+        speaker = Speaker(args.tts)
+        mic = int(args.mic) if args.mic and args.mic.isdigit() else args.mic
+        listener = Listener(speaker, wake=args.wake, model=args.stt_model, device=mic)
+    except ImportError as e:
+        raise SystemExit(f'--voice needs the voice extra ({e.name}): pip install -e ".[voice]"')
+
+    def stop():
+        speaker.close()
+        listener.close()
+    atexit.register(stop)
+    print(f"voice: speaking with {speaker.backend}, listening for \"{args.wake}\" "
+          f"(whisper.cpp {args.stt_model})")
+    return speaker, listener
+
+
+def listen_for_stops(router, speaker, listener, args, guessed):
+    """Stops from a command said out loud, asking again until one is read.
+
+    The same resolve_stops as a typed command: what it cannot read is said
+    back as a request to try again, not the end of the run.
+    """
+    speaker.say(f"Say {args.wake}, and where you would like to go.")
+    while True:
+        command = listener.command()
+        print(f'    VOICE command: "{command}"')
+        found = []
+        try:
+            stops = resolve_stops(router, command, use_nlu=args.nlu, guessed=found)
+        except SystemExit as why:
+            print(f"    VOICE not understood: {why}")
+            speaker.say("Sorry, I don't know where that is. Please try again.")
+            continue
+        args.command = command
+        guessed.extend(found)
+        if not found:
+            speaker.say("Taking you to " + ", then ".join(
+                n if n.startswith("room") else f"the {n}" for n, _ in stops) + ".")
+        return stops
+
+
 def resolve_stops(router, text, use_nlu=False, guessed=None):
     """Command -> [(destination name, floor or None)], one entry per stop.
 
@@ -1374,7 +1431,7 @@ class Run:
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
                  track_log=None, robot=None, cloud_log=None, frame_log=None, puddles=0, puddle_at=(),
                  floor_guard=None, fg_latency=fguard.LATENCY, fg_see=fguard.SEE_D,
-                 fg_miss=0.0):
+                 fg_miss=0.0, speaker=None, listener=None):
         self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                           start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -1387,6 +1444,10 @@ class Run:
         self.stair_flights = self.stair_steps = 0
         self.behind = False
         self.auto_confirm = auto_confirm
+        # --voice: say() is spoken as well as printed, and ask() is answered
+        # out loud (cyberdog.voice). Both None in the twin's batch runs.
+        self.speaker = speaker
+        self.listener = listener
         # Write one frame in `speed`. The building is 48 m end to end and the
         # stairwell and the lift are at opposite ends of it, so a run that
         # visits both spends a minute walking down a corridor that looks the
@@ -1946,8 +2007,11 @@ class Run:
         return out
 
     def say(self, line):
-        """One line of the Preemptive Voice Engine. Printed here, spoken later."""
+        """One line of the Preemptive Voice Engine: printed, and with --voice
+        spoken (queued: speaking never holds up the control loop)."""
         print(f"    [voice] {line}")
+        if self.speaker is not None:
+            self.speaker.say(line)
 
     def handle_tick(self):
         """Read the handle for this tick, and say what a tug or continue did.
@@ -3928,6 +3992,8 @@ class Run:
         visible pause as `confirm`. At a terminal, `enter` given is a press of
         Enter (confirm's handovers); otherwise it is a y/n question.
         """
+        if self.listener is not None and not self.has_handle:
+            prompt = spoken_prompt(prompt)
         self.say(prompt)
         if self.has_handle:
             dt = self.robot.CONTROL_DT
@@ -3945,6 +4011,8 @@ class Run:
                 self.robot.place((x, y), yaw)
                 self.step_crowd()
                 self.frame()
+        if self.listener is not None:
+            return self.ask_voice(what)
         if self.auto_confirm or not sys.stdin.isatty():
             for _ in range(int(WAIT_S * FPS)):
                 self.step_crowd()
@@ -3955,6 +4023,34 @@ class Run:
             input(f"    {enter}")
             return True
         return input("    [y/n] ").strip().lower().startswith("y")
+
+    def ask_voice(self, what, tries=VOICE_TRIES):
+        """The answer to the question just said, out loud: True on a yes.
+
+        On the board the dog stands and the loop keeps ticking while the
+        person answers -- the board stops a dog whose brain goes quiet, but
+        a brain that stops ticking also stops watching. In the twin, time
+        waits for the answer, as it does for a typed one. Not understood is
+        asked again; no answer after `tries` is a no.
+        """
+        for k in range(tries):
+            answer = self.listener.yes_no_async()
+            while not answer.done():
+                if self.real_time:
+                    x, y, yaw = self.robot.get_pose()
+                    self.robot.place((x, y), yaw)
+                    self.step_crowd()
+                    self.frame()
+                else:
+                    time.sleep(0.05)
+            yes, said = answer.result()
+            if yes is not None:
+                print(f"    VOICE {'yes' if yes else 'no'}: {what} ({said!r})")
+                return yes
+            if k < tries - 1:
+                self.say("Please say yes or no.")
+        print(f"    VOICE no answer: {what}")
+        return False
 
     def glide(self, to_xy, yaw, z):
         """Walk a straight short line with the pose set directly.
@@ -4409,6 +4505,20 @@ def main():
                          "own render, which has no people")
     ap.add_argument("--brain-listen", default=None, metavar="IP",
                     help="this machine's address on the link to the board (192.168.55.100)")
+    ap.add_argument("--voice", action="store_true",
+                    help="take the command from the microphone (after the wake phrase) "
+                         "and speak every [voice] line; questions are answered yes/no out "
+                         "loud. Needs the voice extra: pip install -e '.[voice]'")
+    ap.add_argument("--wake", default="hey dog", metavar="PHRASE",
+                    help="--voice: the phrase that calls the dog")
+    ap.add_argument("--stt-model", default="tiny.en", metavar="NAME",
+                    help="--voice: whisper.cpp model, downloaded to models/voice "
+                         "(tiny.en: ~0.8 s a command on the J4012; base.en ~2 s, hears accents better)")
+    ap.add_argument("--tts", choices=["auto", "piper", "say", "print"], default="auto",
+                    help="--voice: how the dog speaks (auto: Piper if its voice is in "
+                         "models/voice, else macOS say, else print only)")
+    ap.add_argument("--mic", default=None, metavar="DEVICE",
+                    help="--voice: input device name or index (default: the system's)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -4441,9 +4551,15 @@ def main():
                             lift_in_service=not args.lift_out_of_service)
     # A refusal -- stairs as a destination, or a floor the lift misses -- is an
     # answer, not a crash. It is the sentence the user would hear.
+    speaker = listener = None
+    if args.voice:
+        speaker, listener = start_voice(args)
     layer, guessed = "language", []
     try:
-        stops = resolve_stops(router, args.command, use_nlu=args.nlu, guessed=guessed)
+        if listener is not None:
+            stops = listen_for_stops(router, speaker, listener, args, guessed)
+        else:
+            stops = resolve_stops(router, args.command, use_nlu=args.nlu, guessed=guessed)
         print(f'command: "{args.command}"')
         for k, (name, floor) in enumerate(stops, 1):
             print(f"  stop {k}: {name}" + (f" (floor {floor})" if floor else ""))
@@ -4468,6 +4584,8 @@ def main():
                 start = (START_FLOOR, tuple(float(v) for v in args.start.split(",")[:2]))
             start_xy, legs, faces = plan_stops(router, stops, start=start)
     except NoAccessibleRoute as refusal:
+        if speaker is not None:
+            speaker.say(str(refusal))
         raise SystemExit(f"[voice] {refusal}\nREFUSED BY planning: no accessible route")
     except SystemExit as refusal:
         raise SystemExit(f"REFUSED BY {layer}: {refusal}")
@@ -4497,7 +4615,8 @@ def main():
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
               robot=robot, puddles=args.puddles, puddle_at=args.puddle_at,
               floor_guard=args.floor_guard,
-              fg_latency=args.fg_latency, fg_see=args.fg_see, fg_miss=args.fg_miss)
+              fg_latency=args.fg_latency, fg_see=args.fg_see, fg_miss=args.fg_miss,
+              speaker=speaker, listener=listener)
     if robot is not None and hasattr(robot, "start"):
         robot.start()
 

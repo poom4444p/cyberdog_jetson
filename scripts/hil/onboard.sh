@@ -60,6 +60,12 @@
 #                                   not the world's (board_main --pose lio)
 #   LIO_RECORD=DIR                  board: save the raw Mid-360 frames, its IMU and
 #                                   the bus pose to DIR (board_main --record)
+#   VOICE=1                         brain: the command from the dog's microphone after
+#                                   "hey dog", and every [voice] line spoken (--voice;
+#                                   DEST is then ignored). Questions are answered yes/no
+#                                   out loud, not by --auto-confirm. Needs the voice extra
+#                                   in go2env and models/voice (run_hil.sh voice-setup)
+#   VOICE_ARGS                      more voice arguments, e.g. "--stt-model tiny.en --mic 2"
 set -u
 
 CYBERDOG=${CYBERDOG:-$HOME/cyberdog_jetson}
@@ -158,6 +164,9 @@ case "${1:-}" in
     echo "VAMOS_MODE=$VAMOS_MODE${VAMOS_STEER:+ VAMOS_STEER=$VAMOS_STEER}"
     steer=()
     [ -n "${VAMOS_STEER:-}" ] && steer=(--vamos-steer "$VAMOS_STEER")
+    voice=()
+    [ "${VOICE:-0}" = 1 ] && voice=(--voice ${VOICE_ARGS:-})
+    echo "voice: $([ "${VOICE:-0}" = 1 ] && echo "on, the command from the microphone" || echo "off, DEST=$dest")"
     camera=()
     [ "$CAMERA" = 1 ] && camera=(--camera-host "$LIFT_HOST")
     echo "camera: $([ "$CAMERA" = 1 ] && echo "the world's, from $LIFT_HOST" || echo "the twin's (no people)")"
@@ -178,7 +187,7 @@ case "${1:-}" in
     # with no display; on the dog the camera is a USB one.
     MUJOCO_GL=egl exec taskset -c "$BRAIN_CORES" python -u "${run[@]}" "$dest" --robot go2_board \
         --lift-host "$LIFT_HOST" "${mode[@]}" --vamos-samples "$samples" --auto-confirm --no-video "${camera[@]}" "${tracklog[@]}" \
-        "${steer[@]}" ${BRAIN_ARGS:-} ;;
+        "${steer[@]}" "${voice[@]}" ${BRAIN_ARGS:-} ;;
 
   stop)
     # [x]yz: matches the process, not a shell whose command line holds the pattern

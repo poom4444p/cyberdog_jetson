@@ -34,6 +34,9 @@ language = [
 ]
 # Rebuilding occupancy grids from point clouds.
 mapping = ["open3d>=0.17.0", "opencv-python>=4.5.0"]
+# Voice in and out on the dog (cyberdog.voice, run_building --voice): whisper.cpp
+# and Piper, both on the CPU. Models go to models/voice (see cyberdog/voice).
+voice = ["sounddevice>=0.4.6", "pywhispercpp>=1.2.0", "piper-tts>=1.3.0"]
 dev = ["pytest>=7.0.0"]
 
 [project.scripts]
